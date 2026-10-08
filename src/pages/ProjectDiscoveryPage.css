@@ -43,12 +43,12 @@
 .project-discovery-card-header h3 { min-width: 0; flex: 1; margin: 0; color: #24344e; font-size: 18px; font-weight: 600; letter-spacing: -.02em; line-height: 1.45; }
 .project-discovery-card-score { display: inline-flex; min-height: 28px; align-items: center; padding: 3px 10px; border: 1px solid #cbdcf6; border-radius: 999px; background: #f7faff; color: #2c5fa8; }
 .project-discovery-card-score strong { font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
-.project-discovery-title-input, .project-discovery-date-input, .project-discovery-fact-input, .project-discovery-summary-input, .project-discovery-profile-input, .project-discovery-detail-metadata input { display: block; width: 100%; min-width: 0; padding: 2px 4px; border: 1px solid transparent; border-radius: 5px; outline: none; background: transparent; color: inherit; font: inherit; overflow-wrap: anywhere; resize: none; }
+.project-discovery-title-input, .project-discovery-date-input, .project-discovery-fact-input, .project-discovery-keyword-input, .project-discovery-summary-input, .project-discovery-profile-input, .project-discovery-detail-metadata input { display: block; width: 100%; min-width: 0; padding: 2px 4px; border: 1px solid transparent; border-radius: 5px; outline: none; background: transparent; color: inherit; font: inherit; overflow-wrap: anywhere; resize: none; }
 .project-discovery-title-input { margin: -2px -4px; color: #24344e; font-size: 18px; font-weight: 600; letter-spacing: -.02em; line-height: 1.45; }
 .project-discovery-date-input { margin: -2px -4px; color: #24344e; font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 600; line-height: 1.6; }
-.project-discovery-title-input:hover, .project-discovery-date-input:hover, .project-discovery-fact-input:hover, .project-discovery-summary-input:hover, .project-discovery-profile-input:hover, .project-discovery-detail-metadata input:hover { border-color: #d5deeb; background: rgba(255,255,255,.72); }
-.project-discovery-title-input:focus-visible, .project-discovery-date-input:focus-visible, .project-discovery-fact-input:focus-visible, .project-discovery-summary-input:focus-visible, .project-discovery-profile-input:focus-visible, .project-discovery-detail-metadata input:focus-visible { border-color: #8eb3ec; background: #fff; box-shadow: 0 0 0 3px rgba(50,107,194,.1); }
-.project-discovery-title-input:disabled, .project-discovery-date-input:disabled, .project-discovery-fact-input:disabled, .project-discovery-summary-input:disabled, .project-discovery-profile-input:disabled, .project-discovery-detail-metadata input:disabled { cursor: wait; opacity: .65; }
+.project-discovery-title-input:hover, .project-discovery-date-input:hover, .project-discovery-fact-input:hover, .project-discovery-keyword-input:hover, .project-discovery-summary-input:hover, .project-discovery-profile-input:hover, .project-discovery-detail-metadata input:hover { border-color: #d5deeb; background: rgba(255,255,255,.72); }
+.project-discovery-title-input:focus-visible, .project-discovery-date-input:focus-visible, .project-discovery-fact-input:focus-visible, .project-discovery-keyword-input:focus-visible, .project-discovery-summary-input:focus-visible, .project-discovery-profile-input:focus-visible, .project-discovery-detail-metadata input:focus-visible { border-color: #8eb3ec; background: #fff; box-shadow: 0 0 0 3px rgba(50,107,194,.1); }
+.project-discovery-title-input:disabled, .project-discovery-date-input:disabled, .project-discovery-fact-input:disabled, .project-discovery-keyword-input:disabled, .project-discovery-summary-input:disabled, .project-discovery-profile-input:disabled, .project-discovery-detail-metadata input:disabled { cursor: wait; opacity: .65; }
 
 .project-discovery-investment-brief { margin-top: 14px; padding: 18px; border: 1px solid #cbdcf6; border-radius: 10px; background: #f7f9ff; }
 .project-discovery-investment-brief dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px 28px; margin: 0; }
@@ -58,6 +58,8 @@
 .project-discovery-investment-brief dd { margin: 4px 0 0; overflow-wrap: anywhere; color: #24344e; font-size: 16px; font-weight: 600; line-height: 1.6; }
 .project-discovery-fact-input { min-height: 32px; margin: -2px -4px; field-sizing: content; color: #24344e; font-size: 16px; font-weight: 600; line-height: 1.6; }
 .project-discovery-fact-input.is-secondary { font-weight: 400; }
+.project-discovery-keyword-input { min-height: 32px; margin: -2px -4px; field-sizing: content; color: #2d66b5; font-size: 16px; font-weight: 700; line-height: 1.6; }
+.project-discovery-keyword-input::placeholder { color: #7a8799; font-weight: 400; }
 .project-discovery-institution-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; }
 .project-discovery-institution-link { display: inline-flex; min-height: 44px; align-items: center; gap: 4px; border-radius: 6px; color: #2d66b5; font-size: 12px; font-weight: 500; line-height: 1.4; text-decoration: none; }
 .project-discovery-institution-link:hover { color: #174d98; text-decoration: underline; }

@@ -213,6 +213,27 @@ export function readProjectDiscoveryCardEdits(lead: LeadListItem): ProjectDiscov
   return edits
 }
 
+export function mergeProjectDiscoveryCandidateEdits(
+  incoming: LeadListItem,
+  current: LeadListItem | undefined,
+  changed: { card?: boolean; keywords?: boolean },
+): LeadListItem {
+  if (!current || (!changed.card && !changed.keywords)) return incoming
+  const incomingProfile = incoming.radarProfile?.profile
+  const currentProfile = current.radarProfile?.profile
+  return {
+    ...incoming,
+    radarProfile: {
+      ...incoming.radarProfile,
+      profile: {
+        ...incomingProfile,
+        ...(changed.card ? { discoveryCardEdits: currentProfile?.discoveryCardEdits } : {}),
+        ...(changed.keywords ? { discoveryKeywords: currentProfile?.discoveryKeywords } : {}),
+      },
+    },
+  }
+}
+
 export function projectDiscoveryDisplayName(lead: LeadListItem): string {
   return readProjectDiscoveryCardEdits(lead)?.name || lead.name || lead.companyName || '未命名项目'
 }
