@@ -27,6 +27,7 @@
     "check:types": "tsc -b && tsc -p server/tsconfig.json --noEmit",
     "accept:due-diligence-contracts": "node --env-file-if-exists=.env --import tsx server/src/scripts/dueDiligenceContractsAcceptance.ts",
     "accept:due-diligence-release": "node --env-file-if-exists=.env --import tsx server/src/scripts/dueDiligenceReleaseAcceptance.ts",
+    "accept:due-diligence-skill-import": "node --env-file-if-exists=.env --import tsx server/src/scripts/dueDiligenceSkillImportAcceptance.ts",
     "check:due-diligence-readiness": "node --env-file-if-exists=.env --import tsx server/src/scripts/dueDiligenceReadiness.ts",
     "test:server": "node --env-file-if-exists=.env --import tsx --test server/tests/*.test.ts",
     "check:platform": "npm run check:types && npm run check:db-boundary && npm run check:production-release-gates && npm run check:single-service && npm run check:migration-checklist-status",

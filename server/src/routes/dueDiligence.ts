@@ -13,6 +13,7 @@ import { createConversation } from '../services/conversationService.js'
 import { fetchAiGatewayChatCompatible } from '../services/aiGatewayService.js'
 import { resolveDueDiligenceModelRuntime } from '../services/aiDueDiligenceSkillRuntimeService.js'
 import { getDueDiligenceAsrCapability, transcribeDueDiligenceBuffer, transcribeDueDiligenceRecording } from '../services/dueDiligenceAsrService.js'
+import { parseDueDiligenceSkillBaseline as parseSkill, prepareDueDiligenceSkillImport } from '../services/dueDiligenceSkillImportService.js'
 import { readDigitalTwinPrivateAsset, saveDigitalTwinPrivateAsset } from '../services/digitalTwinPrivateAssetStorageService.js'
 import { resolveAiModelRoute } from '../services/aiModelSettingsService.js'
 
@@ -709,7 +710,6 @@ dueDiligenceRouter.get('/twins/:id/skill-imports', async (req: AuthedRequest, re
   try { const twinId = routeId(req.params.id); await requireOwnedTwin(twinId, req.user!.uid); res.json({ list: await db.select().from(digitalTwinSkillImports).where(and(eq(digitalTwinSkillImports.twinId, twinId), eq(digitalTwinSkillImports.ownerUserId, req.user!.uid))).orderBy(desc(digitalTwinSkillImports.createdAt)) }) } catch (error) { next(error) }
 })
 const SkillImportSchema = z.object({ sourceType: z.enum(['本机文件夹', 'GitHub', '平台Skill库']), sourceName: z.string().trim().min(1).max(255), sourceUrl: z.string().url().max(2048).optional(), relativePath: z.string().trim().max(512).optional(), content: z.string().trim().min(1).max(512000) })
-function parseSkill(content: string, fallbackName: string) { const lines = content.split(/\r?\n/); const title = lines.find(line => /^#\s+/.test(line))?.replace(/^#\s+/, '').trim() || fallbackName.replace(/\.[^.]+$/, ''); const checklist = lines.filter(line => /^\s*[-*]\s+/.test(line)).slice(0, 20).map(line => line.replace(/^\s*[-*]\s+/, '').trim()); return { name: title.slice(0, 128), trigger: '在相关尽调场景主动启用', instructions: content.slice(0, 30000), checklist, outputFormat: '结论、依据、待核验事项', boundaries: '仅作为私有分身的辅助 Skill；不得执行外部脚本或读取未授权内容。' } }
 function safeSkillContent(content: string) { if (/-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:api[_-]?key|password|secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{12,}/i.test(content)) throw Object.assign(new Error('Skill 内容疑似包含密钥或凭据，已拒绝导入'), { status: 400, code: 'SKILL_SECRET_REJECTED' }) }
 dueDiligenceRouter.post('/twins/:id/skill-imports', async (req: AuthedRequest, res, next) => {
   try { const twinId = routeId(req.params.id); await requireOwnedTwin(twinId, req.user!.uid); const body = SkillImportSchema.parse(req.body); safeSkillContent(body.content); const contentHash = createHash('sha256').update(body.content).digest('hex'); const [existing] = await db.select({ id: digitalTwinSkillImports.id }).from(digitalTwinSkillImports).where(and(eq(digitalTwinSkillImports.twinId, twinId), eq(digitalTwinSkillImports.contentHash, contentHash))).limit(1); if (existing) { res.json({ id: existing.id, duplicate: true }); return }; const id = randomUUID(); await db.insert(digitalTwinSkillImports).values({ id, twinId, ownerUserId: req.user!.uid, ...body, contentHash, parsed: parseSkill(body.content, body.sourceName) }); await audit(req, '导入私有Skill', body.sourceName); res.status(201).json({ id }) } catch (error) { next(error) }
@@ -724,7 +724,29 @@ dueDiligenceRouter.post('/twins/:id/skill-imports/github', async (req: AuthedReq
   } catch (error) { next(error) }
 })
 dueDiligenceRouter.post('/twins/:id/skill-imports/:importId/learn', async (req: AuthedRequest, res, next) => {
-  try { const twinId = routeId(req.params.id); const importId = routeId(req.params.importId); await requireOwnedTwin(twinId, req.user!.uid); const [item] = await db.select().from(digitalTwinSkillImports).where(and(eq(digitalTwinSkillImports.id, importId), eq(digitalTwinSkillImports.twinId, twinId), eq(digitalTwinSkillImports.ownerUserId, req.user!.uid), eq(digitalTwinSkillImports.status, '待学习'))).limit(1); if (!item) throw Object.assign(new Error('待学习 Skill 不存在或已处理'), { status: 404, code: 'NOT_FOUND' }); const parsed = item.parsed as ReturnType<typeof parseSkill>; const skillId = randomUUID(); await db.transaction(async tx => { await tx.insert(digitalTwinSkills).values({ id: skillId, twinId, ownerUserId: req.user!.uid, name: parsed.name, activeVersion: 1, status: '已生效', sourceType: item.sourceType, sourceUrl: item.sourceUrl ?? null, contentHash: item.contentHash }); await tx.insert(digitalTwinSkillVersions).values({ id: randomUUID(), skillId, version: 1, trigger: parsed.trigger, instructions: parsed.instructions, checklist: parsed.checklist, outputFormat: parsed.outputFormat, boundaries: parsed.boundaries, status: '已生效' }); await tx.update(digitalTwinSkillImports).set({ status: '已学习', skillId, updatedAt: new Date() }).where(eq(digitalTwinSkillImports.id, importId)) }); await audit(req, '让数字分身学习Skill', item.sourceName); res.status(201).json({ skillId }) } catch (error) { next(error) }
+  try {
+    const twinId = routeId(req.params.id)
+    const importId = routeId(req.params.importId)
+    await requireOwnedTwin(twinId, req.user!.uid)
+    const [item] = await db.select().from(digitalTwinSkillImports).where(and(
+      eq(digitalTwinSkillImports.id, importId),
+      eq(digitalTwinSkillImports.twinId, twinId),
+      eq(digitalTwinSkillImports.ownerUserId, req.user!.uid),
+      eq(digitalTwinSkillImports.status, '待学习'),
+    )).limit(1)
+    if (!item) throw Object.assign(new Error('待学习 Skill 不存在或已处理'), { status: 404, code: 'NOT_FOUND' })
+    const prepared = await prepareDueDiligenceSkillImport({ content: item.content, sourceName: item.sourceName, role: req.user!.role })
+    const skillId = randomUUID()
+    await db.transaction(async tx => {
+      const [claimed] = await tx.update(digitalTwinSkillImports).set({ status: '已学习', skillId, updatedAt: new Date() })
+        .where(and(eq(digitalTwinSkillImports.id, importId), eq(digitalTwinSkillImports.status, '待学习')))
+      if (claimed.affectedRows !== 1) throw Object.assign(new Error('该 Skill 已由另一请求处理，请刷新'), { status: 409, code: 'SKILL_ALREADY_LEARNED' })
+      await tx.insert(digitalTwinSkills).values({ id: skillId, twinId, ownerUserId: req.user!.uid, name: prepared.parsed.name, activeVersion: 1, status: '已生效', sourceType: item.sourceType, sourceUrl: item.sourceUrl ?? null, contentHash: item.contentHash })
+      await tx.insert(digitalTwinSkillVersions).values({ id: randomUUID(), skillId, version: 1, trigger: prepared.parsed.trigger, instructions: prepared.parsed.instructions, checklist: prepared.parsed.checklist, outputFormat: prepared.parsed.outputFormat, boundaries: prepared.parsed.boundaries, status: '已生效' })
+    })
+    await audit(req, '让数字分身学习Skill', item.sourceName)
+    res.status(201).json({ skillId, generationMode: prepared.generationMode, modelName: prepared.modelName, warning: prepared.warning })
+  } catch (error) { next(error) }
 })
 dueDiligenceRouter.patch('/twins/:id/skills/:skillId', async (req: AuthedRequest, res, next) => { try { const twinId = routeId(req.params.id); const skillId = routeId(req.params.skillId); const body = z.object({ enabled: z.boolean() }).parse(req.body); await db.update(digitalTwinSkills).set({ status: body.enabled ? '已生效' : '已停用', updatedAt: new Date() }).where(and(eq(digitalTwinSkills.id, skillId), eq(digitalTwinSkills.twinId, twinId), eq(digitalTwinSkills.ownerUserId, req.user!.uid))); res.json({ ok: true }) } catch (error) { next(error) } })
 dueDiligenceRouter.get('/twins/:id/skills/:skillId/download', async (req: AuthedRequest, res, next) => { try { const twinId = routeId(req.params.id); const skillId = routeId(req.params.skillId); const [skill] = await db.select().from(digitalTwinSkills).where(and(eq(digitalTwinSkills.id, skillId), eq(digitalTwinSkills.twinId, twinId), eq(digitalTwinSkills.ownerUserId, req.user!.uid))).limit(1); const [version] = skill ? await db.select().from(digitalTwinSkillVersions).where(and(eq(digitalTwinSkillVersions.skillId, skill.id), eq(digitalTwinSkillVersions.version, skill.activeVersion))).limit(1) : []; if (!skill || !version) throw Object.assign(new Error('Skill 不存在'), { status: 404, code: 'NOT_FOUND' }); res.attachment('SKILL.md').type('text/markdown; charset=utf-8').send(`# ${skill.name}\n\n## 触发场景\n${version.trigger}\n\n## 操作步骤\n${version.instructions}\n\n## 核查清单\n${(version.checklist as string[]).map(item => `- ${item}`).join('\n')}\n\n## 输出格式\n${version.outputFormat}\n\n## 适用边界\n${version.boundaries}\n`) } catch (error) { next(error) } })
