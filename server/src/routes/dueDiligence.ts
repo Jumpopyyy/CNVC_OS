@@ -380,11 +380,17 @@ dueDiligenceRouter.put('/projects/:projectId/interviews/:id/transcript', async (
     const { expectedVersion, ...body } = TranscriptSchema.parse(req.body)
     const [current] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
     if (current) {
-      if (expectedVersion !== undefined && expectedVersion !== null && expectedVersion !== current.version) throw Object.assign(new Error('转写稿已在其他页面更新，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
-      await db.update(dueDiligenceInterviewTranscripts).set({ ...body, version: sql`${dueDiligenceInterviewTranscripts.version} + 1`, updatedAt: new Date() }).where(eq(dueDiligenceInterviewTranscripts.id, current.id))
+      if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error('转写稿已在其他页面更新，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
+      const [result] = await db.update(dueDiligenceInterviewTranscripts).set({ ...body, version: sql`${dueDiligenceInterviewTranscripts.version} + 1`, updatedAt: new Date() }).where(and(eq(dueDiligenceInterviewTranscripts.id, current.id), eq(dueDiligenceInterviewTranscripts.version, current.version)))
+      if (result.affectedRows !== 1) throw Object.assign(new Error('转写稿已在其他页面更新，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
     } else {
       if (expectedVersion) throw Object.assign(new Error('转写稿版本已变化，请刷新后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
-      await db.insert(dueDiligenceInterviewTranscripts).values({ id: randomUUID(), interviewId, ...body, createdBy: req.user!.uid })
+      try { await db.insert(dueDiligenceInterviewTranscripts).values({ id: randomUUID(), interviewId, ...body, createdBy: req.user!.uid }) }
+      catch (error) {
+        const databaseError = error as { code?: string; cause?: { code?: string } }
+        if (databaseError.code === 'ER_DUP_ENTRY' || databaseError.cause?.code === 'ER_DUP_ENTRY') throw Object.assign(new Error('转写稿已在其他页面创建，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
+        throw error
+      }
     }
     const [row] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
     await audit(req, '保存访谈转写稿', interviewId); res.json(row)
@@ -415,22 +421,33 @@ function recordingMimeType(file: { type: string; name: string }) {
   return 'audio/webm'
 }
 
-async function processTranscriptionJob(jobId: string) {
+async function processTranscriptionJob(jobId: string, actorUserId?: string) {
   const [job] = await db.select().from(dueDiligenceTranscriptionJobs).where(eq(dueDiligenceTranscriptionJobs.id, jobId)).limit(1)
   if (!job) return
-  const [file] = await db.select({ name: projectFiles.name, type: projectFiles.type, storagePath: projectFiles.storagePath }).from(projectFiles).where(eq(projectFiles.id, job.recordingFileId)).limit(1)
-  if (!file?.storagePath) {
-    await db.update(dueDiligenceTranscriptionJobs).set({ status: '失败', errorMessage: '录音原文件不存在', attempts: sql`${dueDiligenceTranscriptionJobs.attempts} + 1`, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
-    return
-  }
-  await db.update(dueDiligenceTranscriptionJobs).set({ status: '转写中', errorMessage: null, attempts: sql`${dueDiligenceTranscriptionJobs.attempts} + 1`, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
+  // Atomic claim prevents double submissions or retries from calling the provider twice.
+  const [claimed] = await db.update(dueDiligenceTranscriptionJobs).set({ status: '转写中', errorMessage: null, attempts: sql`${dueDiligenceTranscriptionJobs.attempts} + 1`, updatedAt: new Date() }).where(and(eq(dueDiligenceTranscriptionJobs.id, jobId), eq(dueDiligenceTranscriptionJobs.status, '待处理')))
+  if (claimed.affectedRows !== 1) return
   try {
+    const currentActor = actorUserId ?? job.createdBy
+    if (!currentActor) throw Object.assign(new Error('原提交员工已不存在，无法继续转写'), { code: 'ASR_SOURCE_FORBIDDEN' })
+    const [interview] = await db.select({ projectId: dueDiligenceInterviews.projectId }).from(dueDiligenceInterviews).where(eq(dueDiligenceInterviews.id, job.interviewId)).limit(1)
+    if (!interview) throw Object.assign(new Error('访谈已删除'), { code: 'NOT_FOUND' })
+    await requireDueDiligenceProject(currentActor, interview.projectId)
+    const file = await requireProjectFileAccess(db, job.recordingFileId, currentActor)
+    const [artifact] = await db.select({ id: dueDiligenceInterviewArtifacts.id }).from(dueDiligenceInterviewArtifacts).where(and(eq(dueDiligenceInterviewArtifacts.interviewId, job.interviewId), eq(dueDiligenceInterviewArtifacts.fileId, job.recordingFileId), eq(dueDiligenceInterviewArtifacts.kind, '录音'))).limit(1)
+    if (!artifact || file.projectId !== interview.projectId || !file.storagePath) throw Object.assign(new Error('录音原文件不存在或不再属于该访谈'), { code: 'INVALID_RECORDING_FILE' })
     const result = await transcribeDueDiligenceRecording({ storagePath: file.storagePath, fileName: file.name, mimeType: recordingMimeType(file) })
-    await db.update(dueDiligenceTranscriptionJobs).set({ status: '待合并', provider: `${result.provider}/${result.model}`, providerText: result.text, mergedText: [job.browserText.trim(), result.text].filter(Boolean).join('\n\n'), errorMessage: null, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
+    await db.update(dueDiligenceTranscriptionJobs).set({ status: '待合并', provider: `${result.provider}/${result.model}`.slice(0, 64), providerText: result.text, mergedText: [job.browserText.trim(), result.text].filter(Boolean).join('\n\n'), errorMessage: null, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
   } catch (error) {
     const message = error instanceof Error ? error.message : '后台转写失败'
-    await db.update(dueDiligenceTranscriptionJobs).set({ status: message.includes('未配置') ? '未配置' : '失败', errorMessage: message.slice(0, 1000), updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
+    const code = (error as { code?: string })?.code
+    await db.update(dueDiligenceTranscriptionJobs).set({ status: code === 'ASR_NOT_CONFIGURED' ? '未配置' : '失败', errorMessage: message.slice(0, 1000), updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
   }
+}
+
+function scheduleTranscriptionJob(jobId: string, actorUserId?: string) {
+  // Database outages are logged without file contents, credentials or provider payloads.
+  void processTranscriptionJob(jobId, actorUserId).catch(() => console.error(`[due-diligence-asr] unable to process job=${jobId}`))
 }
 
 dueDiligenceRouter.post('/projects/:projectId/interviews/:id/transcriptions', async (req: AuthedRequest, res, next) => {
@@ -440,15 +457,22 @@ dueDiligenceRouter.post('/projects/:projectId/interviews/:id/transcriptions', as
     const body = z.object({ recordingFileId: z.string().uuid(), browserText: z.string().max(200_000).default(''), sourceTranscriptVersion: z.number().int().positive().nullable().optional() }).parse(req.body)
     const file = await requireProjectFileAccess(db, body.recordingFileId, req.user!.uid)
     if (file.projectId !== projectId) throw Object.assign(new Error('录音文件不属于当前项目'), { status: 400, code: 'INVALID_RECORDING_FILE' })
+    if (!/\.(mp3|wav|m4a|webm)$/i.test(file.name)) throw Object.assign(new Error('录音仅支持 MP3、WAV、M4A 或 WebM 格式'), { status: 415, code: 'INVALID_RECORDING_FILE' })
     const [artifact] = await db.select({ id: dueDiligenceInterviewArtifacts.id }).from(dueDiligenceInterviewArtifacts).where(and(eq(dueDiligenceInterviewArtifacts.interviewId, interviewId), eq(dueDiligenceInterviewArtifacts.fileId, body.recordingFileId), eq(dueDiligenceInterviewArtifacts.kind, '录音'))).limit(1)
     if (!artifact) throw Object.assign(new Error('请先将录音归档到当前访谈'), { status: 400, code: 'RECORDING_NOT_ARCHIVED' })
     const [existing] = await db.select().from(dueDiligenceTranscriptionJobs).where(and(eq(dueDiligenceTranscriptionJobs.interviewId, interviewId), eq(dueDiligenceTranscriptionJobs.recordingFileId, body.recordingFileId))).limit(1)
-    const jobId = existing?.id ?? randomUUID()
-    if (existing) await db.update(dueDiligenceTranscriptionJobs).set({ browserText: body.browserText, sourceTranscriptVersion: body.sourceTranscriptVersion ?? null, status: '待处理', errorMessage: null, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId))
-    else await db.insert(dueDiligenceTranscriptionJobs).values({ id: jobId, interviewId, recordingFileId: body.recordingFileId, browserText: body.browserText, sourceTranscriptVersion: body.sourceTranscriptVersion ?? null, createdBy: req.user!.uid, status: getDueDiligenceAsrCapability().configured ? '待处理' : '未配置' })
-    if (getDueDiligenceAsrCapability().configured) void processTranscriptionJob(jobId)
-    const [row] = await db.select().from(dueDiligenceTranscriptionJobs).where(eq(dueDiligenceTranscriptionJobs.id, jobId)).limit(1)
-    await audit(req, '创建访谈后台转写任务', interviewId); res.status(existing ? 200 : 201).json(row)
+    // Returning the existing snapshot is idempotent and never discards a completed result.
+    if (existing) { res.json(existing); return }
+    if (body.sourceTranscriptVersion) {
+      const [transcript] = await db.select({ version: dueDiligenceInterviewTranscripts.version }).from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
+      if (transcript?.version !== body.sourceTranscriptVersion) throw Object.assign(new Error('转写稿已更新，请刷新后重新提交后台转写'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
+    }
+    const jobId = randomUUID(); const configured = getDueDiligenceAsrCapability().configured
+    await db.insert(dueDiligenceTranscriptionJobs).values({ id: jobId, interviewId, recordingFileId: body.recordingFileId, browserText: body.browserText, sourceTranscriptVersion: body.sourceTranscriptVersion ?? null, createdBy: req.user!.uid, status: configured ? '待处理' : '未配置', errorMessage: configured ? null : '后台转写未配置；录音已保留，已有转写文字仍可生成纪要' }).onDuplicateKeyUpdate({ set: { id: sql`${dueDiligenceTranscriptionJobs.id}` } })
+    const [row] = await db.select().from(dueDiligenceTranscriptionJobs).where(and(eq(dueDiligenceTranscriptionJobs.interviewId, interviewId), eq(dueDiligenceTranscriptionJobs.recordingFileId, body.recordingFileId))).limit(1)
+    if (configured && row.status === '待处理') scheduleTranscriptionJob(row.id)
+    if (row.id === jobId) await audit(req, '创建访谈后台转写任务', interviewId)
+    res.status(row.id === jobId ? 201 : 200).json(row)
   } catch (error) { next(error) }
 })
 
@@ -457,7 +481,21 @@ dueDiligenceRouter.get('/projects/:projectId/interviews/:id/transcriptions', asy
 })
 
 dueDiligenceRouter.post('/projects/:projectId/interviews/:id/transcriptions/:jobId/retry', async (req: AuthedRequest, res, next) => {
-  try { const projectId = routeId(req.params.projectId); const interviewId = routeId(req.params.id); const jobId = routeId(req.params.jobId); await requireDueDiligenceProject(req.user!.uid, projectId); await requireInterview(projectId, interviewId); const [job] = await db.select().from(dueDiligenceTranscriptionJobs).where(and(eq(dueDiligenceTranscriptionJobs.id, jobId), eq(dueDiligenceTranscriptionJobs.interviewId, interviewId))).limit(1); if (!job) throw Object.assign(new Error('转写任务不存在'), { status: 404, code: 'NOT_FOUND' }); if (!getDueDiligenceAsrCapability().configured) throw Object.assign(new Error('未配置后台转写服务'), { status: 503, code: 'ASR_NOT_CONFIGURED' }); await db.update(dueDiligenceTranscriptionJobs).set({ status: '待处理', errorMessage: null, updatedAt: new Date() }).where(eq(dueDiligenceTranscriptionJobs.id, jobId)); void processTranscriptionJob(jobId); res.json({ ok: true }) } catch (error) { next(error) }
+  try {
+    const projectId = routeId(req.params.projectId); const interviewId = routeId(req.params.id); const jobId = routeId(req.params.jobId)
+    await requireDueDiligenceProject(req.user!.uid, projectId); await requireInterview(projectId, interviewId)
+    const [job] = await db.select().from(dueDiligenceTranscriptionJobs).where(and(eq(dueDiligenceTranscriptionJobs.id, jobId), eq(dueDiligenceTranscriptionJobs.interviewId, interviewId))).limit(1)
+    if (!job) throw Object.assign(new Error('转写任务不存在'), { status: 404, code: 'NOT_FOUND' })
+    if (!['失败', '未配置'].includes(job.status)) { res.json(job); return }
+    if (!getDueDiligenceAsrCapability().configured) throw Object.assign(new Error('后台转写未配置；录音已保留，已有转写文字仍可生成纪要'), { status: 503, code: 'ASR_NOT_CONFIGURED' })
+    const file = await requireProjectFileAccess(db, job.recordingFileId, req.user!.uid)
+    const [artifact] = await db.select({ id: dueDiligenceInterviewArtifacts.id }).from(dueDiligenceInterviewArtifacts).where(and(eq(dueDiligenceInterviewArtifacts.interviewId, interviewId), eq(dueDiligenceInterviewArtifacts.fileId, job.recordingFileId), eq(dueDiligenceInterviewArtifacts.kind, '录音'))).limit(1)
+    if (!artifact || file.projectId !== projectId || !file.storagePath) throw Object.assign(new Error('录音原文件不存在或不再属于该访谈'), { status: 400, code: 'INVALID_RECORDING_FILE' })
+    const [queued] = await db.update(dueDiligenceTranscriptionJobs).set({ status: '待处理', errorMessage: null, updatedAt: new Date() }).where(and(eq(dueDiligenceTranscriptionJobs.id, jobId), inArray(dueDiligenceTranscriptionJobs.status, ['失败', '未配置'])))
+    const [row] = await db.select().from(dueDiligenceTranscriptionJobs).where(eq(dueDiligenceTranscriptionJobs.id, jobId)).limit(1)
+    if (queued.affectedRows === 1) { scheduleTranscriptionJob(jobId, req.user!.uid); await audit(req, '重试访谈后台转写', interviewId) }
+    res.json(row)
+  } catch (error) { next(error) }
 })
 
 dueDiligenceRouter.get('/projects/:projectId/interviews/:id/export/:kind', async (req: AuthedRequest, res, next) => {

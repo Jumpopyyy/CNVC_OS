@@ -207,6 +207,18 @@ export function projectFileMimeType(fileName: string): string {
   return FILE_KINDS[path.extname(fileName).slice(1).toLowerCase()]?.mime || 'application/octet-stream'
 }
 
+/** Revalidate persisted audio before passing it to a transcription provider. */
+export async function validateProjectAudioBuffer(fileName: string, buffer: Buffer): Promise<string> {
+  const extension = path.extname(fileName).slice(1).toLowerCase()
+  const kind = FILE_KINDS[extension]
+  if (!kind || !['mp3', 'wav', 'm4a', 'webm'].includes(kind.signature)) {
+    throw fileError(415, 'INVALID_RECORDING_FILE', '录音仅支持 MP3、WAV、M4A 或 WebM 格式')
+  }
+  if (!buffer.length) throw fileError(400, 'EMPTY_FILE', '录音文件没有内容')
+  await assertSignature(extension, kind, buffer)
+  return kind.mime
+}
+
 export function projectFilePreviewMimeType(fileName: string): string | null {
   const extension = path.extname(fileName).slice(1).toLowerCase()
   const kind = FILE_KINDS[extension]
