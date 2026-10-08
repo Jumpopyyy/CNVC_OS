@@ -165,7 +165,10 @@ dueDiligenceRouter.patch('/projects/:projectId/questions/:id', async (req: Authe
     if (fileIds) { await db.delete(dueDiligenceQuestionEvidence).where(eq(dueDiligenceQuestionEvidence.questionId, id)); if (fileIds.length) await db.insert(dueDiligenceQuestionEvidence).values(fileIds.map(fileId => ({ id: randomUUID(), questionId: id, fileId }))) }
     const [row] = await db.select().from(dueDiligenceQuestions).where(eq(dueDiligenceQuestions.id, id)).limit(1)
     await recordExperienceEvent({ ownerUserId: req.user!.uid, projectId, eventType: row.status === '已完成' ? 'question.completed' : 'question.updated', entityType: 'question', entityId: id, topic: row.category || '尽调核验', fingerprint: `${id}:v${row.version}`, payload: { title: row.title, priority: row.priority, status: row.status, source: row.source, conclusion: row.conclusion, note: row.followUpNote } })
-    if (row.status === '已完成') await createCurrentUserExperienceCandidate(req.user!.uid, { projectId, sourceHash: `${id}:v${row.version}`, sourceName: `核查结论：${row.title}`, sourceType: '已完成核查', sourceKey: `question:${id}:v${row.version}`, topic: row.category || '尽调核验', confidence: 78, excerpt: `${row.title}\n结论：${row.conclusion || ''}\n备注：${row.followUpNote || ''}` }).catch(() => false)
+    if (row.status === '已完成') {
+      await createCurrentUserExperienceCandidate(req.user!.uid, { projectId, sourceHash: `${id}:v${row.version}`, sourceName: `核查结论：${row.title}`, sourceType: '已完成核查', sourceKey: `question:${id}:v${row.version}`, topic: row.category || '尽调核验', confidence: 78, excerpt: `${row.title}\n结论：${row.conclusion || ''}\n备注：${row.followUpNote || ''}` }).catch(() => false)
+      scheduleExperienceLearning(req.user!.uid, req.user!.role)
+    }
     await audit(req, '更新核查问题', id); res.json(row)
   } catch (error) { next(error) }
 })
@@ -326,7 +329,11 @@ dueDiligenceRouter.patch('/projects/:projectId/interviews/:id', async (req: Auth
     const [result] = await db.update(dueDiligenceInterviews).set(patch).where(and(eq(dueDiligenceInterviews.id, id), eq(dueDiligenceInterviews.projectId, projectId), eq(dueDiligenceInterviews.version, expectedVersion)))
     if (result.affectedRows !== 1) throw Object.assign(new Error('访谈记录已被更新，请刷新后重试'), { status: 409, code: 'VERSION_CONFLICT' })
     const [row] = await db.select().from(dueDiligenceInterviews).where(eq(dueDiligenceInterviews.id, id)).limit(1)
-    if (row.status === '已结束' && row.summary?.trim()) { await recordExperienceEvent({ ownerUserId: req.user!.uid, projectId, eventType: 'interview.confirmed', entityType: 'interview', entityId: id, topic: '现场访谈判断', fingerprint: `${id}:v${row.version}`, payload: { title: row.title, note: row.summary } }); await createCurrentUserExperienceCandidate(req.user!.uid, { projectId, sourceHash: `${id}:v${row.version}`, sourceName: `访谈纪要：${row.title}`, sourceType: '已确认访谈纪要', sourceKey: `interview:${id}:v${row.version}`, topic: '现场访谈判断', confidence: 82, excerpt: row.summary }).catch(() => false) }
+    if (row.status === '已结束' && row.summary?.trim()) {
+      await recordExperienceEvent({ ownerUserId: req.user!.uid, projectId, eventType: 'interview.confirmed', entityType: 'interview', entityId: id, topic: '现场访谈判断', fingerprint: `${id}:v${row.version}`, payload: { title: row.title, note: row.summary } })
+      await createCurrentUserExperienceCandidate(req.user!.uid, { projectId, sourceHash: `${id}:v${row.version}`, sourceName: `访谈纪要：${row.title}`, sourceType: '已确认访谈纪要', sourceKey: `interview:${id}:v${row.version}`, topic: '现场访谈判断', confidence: 82, excerpt: row.summary }).catch(() => false)
+      scheduleExperienceLearning(req.user!.uid, req.user!.role)
+    }
     await audit(req, '更新访谈记录', id); res.json(row)
   } catch (error) { next(error) }
 })
@@ -579,6 +586,33 @@ async function recordExperienceEvent(input: { ownerUserId: string; projectId?: s
   } catch {
     return false
   }
+}
+
+const experienceLearningTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function scheduleExperienceLearning(ownerUserId: string, role: string) {
+  const existing = experienceLearningTimers.get(ownerUserId)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    experienceLearningTimers.delete(ownerUserId)
+    void (async () => {
+      const [target] = await db.select({ id: digitalTwins.id }).from(digitalTwins).where(and(
+        eq(digitalTwins.ownerUserId, ownerUserId),
+        isNull(digitalTwins.deletedAt),
+        isNotNull(digitalTwins.learningTargetAt),
+      )).orderBy(desc(digitalTwins.learningTargetAt)).limit(1)
+      if (!target) return
+      await synthesizeRuleCandidates(target.id, ownerUserId)
+      await enrichExperienceEventsWithModel(target.id, ownerUserId, role)
+    })().catch(error => {
+      console.warn(JSON.stringify({
+        event: 'due_diligence_experience_learning_failed',
+        ownerUserId,
+        message: error instanceof Error ? error.message.slice(0, 200) : 'unknown',
+      }))
+    })
+  }, 2_000)
+  timer.unref?.()
+  experienceLearningTimers.set(ownerUserId, timer)
 }
 
 async function createExperienceCandidate(input: { twinId: string; ownerUserId: string; projectId?: string | null; sourceFileId?: string | null; sourceHash: string; sourceName: string; sourceType: string; sourceKey: string; topic: string; confidence: number; excerpt: string; engine?: 'rules' | 'model'; evidenceCount?: number }) {

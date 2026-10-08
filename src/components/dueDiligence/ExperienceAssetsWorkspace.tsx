@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronDown, Mic, Plus, RefreshCw, Send, Trash2, Upload } from 'lucide-react'
+import { ChevronDown, Mic, Plus, Send, Trash2, Upload } from 'lucide-react'
 import { Badge, Button, Card, Modal } from '../ui'
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition'
 import type { LearningCandidate, PublicTwin, Twin, TwinAsset, TwinSkill, TwinSkillImport } from './types'
@@ -35,7 +35,7 @@ export function ExperienceAssetsWorkspace(props: {
   onImportLocal: (file: File) => Promise<void>
   onImportSource: (source: ImportableSource) => Promise<void>
   onParseAsset: (asset: TwinAsset) => Promise<string | null>
-  onScanLearning: () => Promise<void>
+  onScanLearning: (options?: { silent?: boolean }) => Promise<void>
   onDecideCandidates: (ids: string[], decision: '确认' | '拒绝') => Promise<void>
   onImportSkillFiles: (files: FileList | File[]) => Promise<void>
   onImportGithubSkill: (url: string) => Promise<void>
@@ -46,7 +46,6 @@ export function ExperienceAssetsWorkspace(props: {
   onConversationFeedback: (input: { userQuestion: string; assistantAnswer: string; feedback: '采纳' | '修改' | '拒绝'; feedbackNote: string }) => Promise<void>
 }) {
   const [selectedCandidates, setSelectedCandidates] = useState<string[]>([])
-  const [scanning, setScanning] = useState(false)
   const [sourceOpen, setSourceOpen] = useState(false)
   const [avatarOpen, setAvatarOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -57,8 +56,15 @@ export function ExperienceAssetsWorkspace(props: {
   const [feedbackNote, setFeedbackNote] = useState('')
   const [url, setUrl] = useState('')
   const nameRef = useRef<HTMLInputElement | null>(null)
+  const automaticallyScannedTwins = useRef(new Set<string>())
   const speech = useSpeechRecognition({ continuous: true, onFinal: text => props.onDraft({ ...props.draft, rules: `${props.draft.rules}${props.draft.rules ? '\n' : ''}${text}` }) })
   useEffect(() => { if (props.isNew) nameRef.current?.focus() }, [props.isNew])
+  useEffect(() => {
+    const twinId = props.selectedTwin?.id
+    if (!twinId || automaticallyScannedTwins.current.has(twinId)) return
+    automaticallyScannedTwins.current.add(twinId)
+    void props.onScanLearning({ silent: true })
+  }, [props.selectedTwin?.id])
 
   const ownPublished = new Map(props.publicTwins.filter(item => item.ownerUserId === props.currentUserId).map(item => [item.twinId, item]))
   const otherPublished = props.publicTwins.filter(item => item.ownerUserId !== props.currentUserId)
@@ -94,7 +100,7 @@ export function ExperienceAssetsWorkspace(props: {
     </Card>
 
     <Card className="p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">沉淀的 Skill 库</h2>{props.selectedTwin && <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={scanning} onClick={() => { setScanning(true); void props.onScanLearning().finally(() => setScanning(false)) }}><RefreshCw className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />扫描经验</Button><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm"><Upload className="mr-1 h-4 w-4" />导入素材<input className="hidden" type="file" accept=".txt,.md,.pdf,.doc,.docx,.mp3,.m4a,.wav,.webm" onChange={event => { const file = event.target.files?.[0]; if (file) void props.onImportLocal(file); event.currentTarget.value = '' }} /></label><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm">导入本机 Skill<input className="hidden" type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} accept=".md,.txt,.json,.yaml,.yml" onChange={event => { if (event.target.files?.length) void props.onImportSkillFiles(event.target.files); event.currentTarget.value = '' }} /></label><Button variant="secondary" onClick={() => setSourceOpen(true)}>知识库导入</Button></div>}</div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">沉淀的 Skill 库</h2>{props.selectedTwin && <div className="flex flex-wrap gap-2"><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm"><Upload className="mr-1 h-4 w-4" />导入素材<input className="hidden" type="file" accept=".txt,.md,.pdf,.doc,.docx,.mp3,.m4a,.wav,.webm" onChange={event => { const file = event.target.files?.[0]; if (file) void props.onImportLocal(file); event.currentTarget.value = '' }} /></label><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm">导入本机 Skill<input className="hidden" type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} accept=".md,.txt,.json,.yaml,.yml" onChange={event => { if (event.target.files?.length) void props.onImportSkillFiles(event.target.files); event.currentTarget.value = '' }} /></label><Button variant="secondary" onClick={() => setSourceOpen(true)}>知识库导入</Button></div>}</div>
       {!props.selectedTwin ? <p className="mt-4 text-sm text-slate-400">请先选择一个数字分身。</p> : <>
         <div className="mt-4 grid gap-3 lg:grid-cols-2"><div className="rounded-lg border p-3"><strong className="text-sm">从网址链接导入</strong><div className="mt-2 flex gap-2"><input className="input" value={url} onChange={event => setUrl(event.target.value)} placeholder="粘贴公开 Skill 说明文件链接" /><Button size="sm" disabled={!url.trim()} onClick={() => void props.onImportGithubSkill(url).then(() => setUrl(''))}>导入</Button></div></div><div className="rounded-lg border p-3"><strong className="text-sm">平台 Skill 库</strong><div className="mt-2 max-h-24 space-y-1 overflow-auto">{props.platformSkills.map(skill => <button key={skill.id} className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-50" onClick={() => void props.onImportPlatformSkill(skill)}>导入 · {skill.name}</button>)}{!props.platformSkills.length && <p className="text-xs text-slate-400">暂无可导入的平台 Skill。</p>}</div></div></div>
         <div className="mt-5 grid gap-5 lg:grid-cols-2">
