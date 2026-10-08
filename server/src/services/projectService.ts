@@ -214,6 +214,7 @@ const projectFileListColumns = {
   size: projectFiles.size,
   uploader: projectFiles.uploader,
   parseStatus: projectFiles.parseStatus,
+  parseError: projectFiles.parseError,
   visibility: projectFiles.visibility,
   storagePath: projectFiles.storagePath,
   version: projectFiles.version,
@@ -243,9 +244,20 @@ export async function listAllFiles(userId?: string) {
   return rows.map(publicProjectFile)
 }
 
-function publicProjectFile<T extends { storagePath: string | null }>(row: T) {
-  const { storagePath, ...file } = row
-  return { ...file, hasOriginal: Boolean(storagePath) }
+function safeProjectFileParseError(value: string | null | undefined) {
+  if (!value) return null
+  const message = value.toLowerCase()
+  if (/未能从文件中提取|没有可读取的文字|未识别到文字/.test(value)) return '未提取到正文文字；若为扫描件，请尝试清晰 PDF 或原始 Word/PPT 文件。'
+  if (/ocr|pdftoppm|网关未配置/.test(message)) return '扫描件文字识别未成功，可能是 OCR 服务不可用或图片清晰度不足。'
+  if (/扩展名|结构无效|invalid|corrupt|unexpected end|eof/.test(message)) return '文件内容或结构异常，请从原文件重新导出后上传。'
+  if (/unsupported|不支持/.test(message)) return '当前文件格式暂不支持正文解析。'
+  if (/file_source_changed|文件已删除|版本已变化/.test(message)) return '文件内容或版本已变化，请重新选择最新材料。'
+  return '正文解析未完成，请稍后重试；若持续失败，请联系管理员检查解析服务。'
+}
+
+function publicProjectFile<T extends { storagePath: string | null; parseError?: string | null }>(row: T) {
+  const { storagePath, parseError, ...file } = row
+  return { ...file, parseErrorHint: safeProjectFileParseError(parseError), hasOriginal: Boolean(storagePath) }
 }
 
 export async function createProject(

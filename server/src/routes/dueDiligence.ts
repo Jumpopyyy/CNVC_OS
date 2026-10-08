@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { createHash, randomUUID } from 'node:crypto'
-import { AlignmentType, Document, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } from 'docx'
+import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx'
 import { Router } from 'express'
 import { z } from 'zod'
 import { db } from '../db/client.js'
@@ -16,6 +16,7 @@ import { getDueDiligenceAsrCapability, transcribeDueDiligenceBuffer, transcribeD
 import { parseDueDiligenceSkillBaseline as parseSkill, prepareDueDiligenceSkillImport } from '../services/dueDiligenceSkillImportService.js'
 import { readDigitalTwinPrivateAsset, saveDigitalTwinPrivateAsset } from '../services/digitalTwinPrivateAssetStorageService.js'
 import { resolveAiModelRoute } from '../services/aiModelSettingsService.js'
+import { buildDueDiligenceQuestionPackDocx } from '../services/dueDiligenceQuestionPackDocxService.js'
 
 export const dueDiligenceRouter = Router()
 const DUE_DILIGENCE_API_VERSION = 2
@@ -289,11 +290,8 @@ dueDiligenceRouter.get('/projects/:projectId/question-packs/:id/docx', async (re
     const projectId = routeId(req.params.projectId); const id = routeId(req.params.id); await requireDueDiligenceProject(req.user!.uid, projectId)
     const [pack] = await db.select().from(dueDiligenceQuestionPacks).where(and(eq(dueDiligenceQuestionPacks.id, id), eq(dueDiligenceQuestionPacks.projectId, projectId))).limit(1)
     const [project] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, projectId)).limit(1); if (!pack || !project) throw Object.assign(new Error('尽调问题清单不存在'), { status: 404, code: 'NOT_FOUND' })
-    const rows = [new TableRow({ children: ['序号', '核查问题', '类别', '优先级', '关注来源', '核查目标与所需证据'].map(text => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text, bold: true })] })] })) }), ...pack.questions.map((question, index) => new TableRow({ children: [String(index + 1), question.title, question.category, question.priority, question.attentionSource || '标准模板', `${question.rationale}\n证据：${question.evidenceRequirement}`].map(text => new TableCell({ children: [new Paragraph(text)] })) }))]
-    const references = [...new Set(pack.questions.flatMap(question => question.attentionSource?.includes('分身 v') ? [question.attentionSource] : []))]
-    const method = pack.generationMode === 'ai' ? '智能增强' : `标准清单（题库 ${pack.templateVersion}）`
-    const doc = new Document({ sections: [{ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: pack.title, bold: true, size: 32, font: '黑体' })] }), new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun(`项目：${project.name}    生成日期：${new Date().toLocaleDateString('zh-CN')}`)] }), new Paragraph({ text: `生成方式：${method}。参考公开分身：${references.join('；') || '无'}。${pack.warning ? `提示：${pack.warning}。` : ''}本清单为尽调起点，请结合项目实际人工复核。` }), new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows })] }] })
-    const buffer = await Packer.toBuffer(doc); await audit(req, '导出尽调问题Word', pack.title); res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'); res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${pack.title}.docx`)}`); res.send(buffer)
+    const buffer = await buildDueDiligenceQuestionPackDocx({ title: pack.title, projectName: project.name, questions: pack.questions })
+    await audit(req, '导出尽调问题Word', pack.title); res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'); res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${pack.title}.docx`)}`); res.send(buffer)
   } catch (error) { next(error) }
 })
 

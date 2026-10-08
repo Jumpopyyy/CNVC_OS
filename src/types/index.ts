@@ -65,6 +65,7 @@ export interface ProjectFile {
   uploader: string
   uploadedAt: string
   parseStatus: JobStatus
+  parseErrorHint?: string | null
   version: number
   visibility: string
   hasOriginal?: boolean

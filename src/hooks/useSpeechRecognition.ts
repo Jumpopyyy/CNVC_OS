@@ -12,9 +12,27 @@ type RecognitionLike = {
   onstart: (() => void) | null
   onend: (() => void) | null
   onerror: ((event: { error: string }) => void) | null
-  onresult: ((event: { results: ArrayLike<RecognitionResultLike> }) => void) | null
+  onresult: ((event: { results: ArrayLike<RecognitionResultLike>; resultIndex?: number }) => void) | null
 }
 type RecognitionConstructor = new () => RecognitionLike
+
+export function readSpeechRecognitionDelta(
+  results: ArrayLike<RecognitionResultLike>,
+  finalCursor: number,
+  changedIndex = finalCursor,
+) {
+  let confirmed = ''
+  let interim = ''
+  let nextCursor = finalCursor
+  const firstNewResult = Math.max(finalCursor, changedIndex)
+  for (let index = firstNewResult; index < results.length; index += 1) {
+    const result = results[index]
+    const text = result?.[0]?.transcript || ''
+    if (result?.isFinal) { confirmed += text; nextCursor = index + 1 }
+    else interim += text
+  }
+  return { confirmed: confirmed.trim(), interim, nextCursor }
+}
 
 function recognitionConstructor() {
   const speechWindow = window as unknown as { SpeechRecognition?: RecognitionConstructor; webkitSpeechRecognition?: RecognitionConstructor }
@@ -40,12 +58,24 @@ export function useSpeechRecognition(options: {
   const shouldListen = useRef(false)
   const intentionalStop = useRef(false)
   const lastInterim = useRef('')
+  const finalResultCursor = useRef(0)
+  const lastFinalText = useRef('')
+  const lastFinalAt = useRef(0)
+  const flushedInterimText = useRef('')
+  const flushedInterimAt = useRef(0)
+  const stopResolver = useRef<(() => void) | null>(null)
+  const stopPromise = useRef<Promise<void> | null>(null)
+  const stopTimer = useRef<number | null>(null)
   const optionsRef = useRef(options)
   optionsRef.current = options
 
   const flushInterim = useCallback(() => {
     const text = lastInterim.current.trim()
-    if (text) optionsRef.current.onFinal(text)
+    if (text) {
+      flushedInterimText.current = text.replace(/\s+/g, '')
+      flushedInterimAt.current = Date.now()
+      optionsRef.current.onFinal(text)
+    }
     lastInterim.current = ''
     optionsRef.current.onInterim?.('')
   }, [])
@@ -59,46 +89,88 @@ export function useSpeechRecognition(options: {
       setState('error'); setError('语音输入需要 HTTPS 安全连接。'); return
     }
     const item = new Speech()
+    finalResultCursor.current = 0
     item.lang = 'zh-CN'; item.continuous = Boolean(optionsRef.current.continuous); item.interimResults = true
-    item.onstart = () => { setState('listening'); setError('') }
+    item.onstart = () => { if (recognizer.current === item) { setState('listening'); setError('') } }
     item.onresult = event => {
-      let confirmed = ''; let interim = ''
-      Array.from(event.results).forEach(result => { const text = result[0]?.transcript || ''; if (result.isFinal) confirmed += text; else interim += text })
-      if (confirmed.trim()) optionsRef.current.onFinal(confirmed.trim())
-      lastInterim.current = interim
-      optionsRef.current.onInterim?.(interim)
+      if (recognizer.current !== item) return
+      const delta = readSpeechRecognitionDelta(event.results, finalResultCursor.current, event.resultIndex ?? finalResultCursor.current)
+      finalResultCursor.current = delta.nextCursor
+      if (delta.confirmed) {
+        const normalized = delta.confirmed.replace(/\s+/g, '')
+        const now = Date.now()
+        // Some browser engines deliver the same final result again when stop()
+        // flushes an interim phrase. Ignore only an immediate identical repeat;
+        // later repetitions may be genuine speech and should be kept.
+        const repeatedFlushedInterim = normalized === flushedInterimText.current && now - flushedInterimAt.current < 3_000
+        const repeatedFinal = normalized === lastFinalText.current && now - lastFinalAt.current < 1_500
+        if (!repeatedFlushedInterim && !repeatedFinal) optionsRef.current.onFinal(delta.confirmed)
+        lastFinalText.current = normalized
+        lastFinalAt.current = now
+        flushedInterimText.current = ''
+      }
+      lastInterim.current = delta.interim
+      optionsRef.current.onInterim?.(delta.interim)
     }
     item.onerror = event => {
+      if (recognizer.current !== item) return
       if (intentionalStop.current && event.error === 'aborted') return
       if (event.error === 'no-speech' && shouldListen.current && optionsRef.current.continuous) return
       setState('error'); setError(speechErrorMessage(event.error))
     }
     item.onend = () => {
+      if (recognizer.current !== item) return
       recognizer.current = null
       if (shouldListen.current && optionsRef.current.continuous) {
-        window.setTimeout(() => { if (shouldListen.current) createAndStart() }, 150)
-      } else if (!intentionalStop.current) setState('complete')
+        window.setTimeout(() => { if (shouldListen.current && !recognizer.current) createAndStart() }, 150)
+      } else if (stopResolver.current) stopResolver.current()
+      else {
+        flushInterim()
+        if (!intentionalStop.current) setState('complete')
+      }
     }
     recognizer.current = item
     try { item.start() } catch (cause) { setState('error'); setError(cause instanceof Error ? cause.message : '语音识别启动失败') }
-  }, [])
+  }, [flushInterim])
 
   const start = useCallback(() => {
+    stopResolver.current?.()
     intentionalStop.current = false; shouldListen.current = true; setState('requesting'); setError('')
-    recognizer.current?.abort?.(); recognizer.current = null; createAndStart()
+    if (stopTimer.current !== null) window.clearTimeout(stopTimer.current)
+    stopTimer.current = null; stopResolver.current = null
+    const previous = recognizer.current; recognizer.current = null; previous?.abort?.(); createAndStart()
   }, [createAndStart])
 
-  const pause = useCallback(() => {
-    shouldListen.current = false; intentionalStop.current = true; flushInterim(); recognizer.current?.stop(); setState('paused')
+  const stopWithState = useCallback((nextState: 'paused' | 'complete') => {
+    shouldListen.current = false; intentionalStop.current = true; setState(nextState)
+    if (stopPromise.current) return stopPromise.current
+    const current = recognizer.current
+    if (!current) { flushInterim(); return Promise.resolve() }
+    let resolveStop!: () => void
+    const pending = new Promise<void>(resolve => { resolveStop = resolve })
+    stopPromise.current = pending
+    const finish = () => {
+      if (stopResolver.current !== finish) return
+      if (stopTimer.current !== null) window.clearTimeout(stopTimer.current)
+      stopTimer.current = null
+      stopResolver.current = null
+      stopPromise.current = null
+      if (recognizer.current === current) { recognizer.current = null; current.abort?.() }
+      flushInterim()
+      resolveStop()
+    }
+    stopResolver.current = finish
+    stopTimer.current = window.setTimeout(finish, 1_200)
+    try { current.stop() } catch { finish() }
+    return pending
   }, [flushInterim])
 
-  const stop = useCallback(() => {
-    shouldListen.current = false; intentionalStop.current = true; flushInterim(); recognizer.current?.stop(); setState('complete')
-  }, [flushInterim])
+  const pause = useCallback(() => stopWithState('paused'), [stopWithState])
+  const stop = useCallback(() => stopWithState('complete'), [stopWithState])
 
-  const reset = useCallback(() => { shouldListen.current = false; intentionalStop.current = true; recognizer.current?.abort?.(); recognizer.current = null; lastInterim.current = ''; optionsRef.current.onInterim?.(''); setError(''); setState('idle') }, [])
+  const reset = useCallback(() => { shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); stopTimer.current = null; const previous = recognizer.current; recognizer.current = null; previous?.abort?.(); finalResultCursor.current = 0; lastFinalText.current = ''; lastFinalAt.current = 0; flushedInterimText.current = ''; flushedInterimAt.current = 0; optionsRef.current.onInterim?.(''); setError(''); setState('idle') }, [])
 
-  useEffect(() => () => { shouldListen.current = false; intentionalStop.current = true; recognizer.current?.abort?.() }, [])
+  useEffect(() => () => { shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); const previous = recognizer.current; recognizer.current = null; previous?.abort?.() }, [])
 
   return { state, error, supported: Boolean(recognitionConstructor()), start, pause, stop, reset, flushInterim }
 }

@@ -46,6 +46,10 @@ async function main() {
     { name: 'sample.gif', mime: 'image/gif', buffer: Buffer.from('GIF89a') },
     { name: 'sample.bmp', mime: 'image/bmp', buffer: Buffer.from('BMfixture') },
     { name: 'sample.webp', mime: 'image/webp', buffer: Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]) },
+    { name: 'sample.mp3', mime: 'audio/mpeg', buffer: Buffer.from('ID3fixture') },
+    { name: 'sample.wav', mime: 'audio/wav', buffer: Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVEfixture')]) },
+    { name: 'sample.m4a', mime: 'audio/mp4', buffer: Buffer.concat([Buffer.alloc(4), Buffer.from('ftypisom'), Buffer.alloc(8)]) },
+    { name: 'sample.webm', mime: 'audio/webm', buffer: Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x42, 0x86, 0x81, 0x01]) },
   ]
   if (new Set(fixtures.map((fixture) => path.extname(fixture.name).slice(1))).size !== supportedProjectFileExtensions.length) {
     throw new Error('acceptance fixtures do not cover every supported extension')

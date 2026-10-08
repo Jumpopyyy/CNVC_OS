@@ -46,9 +46,11 @@ export function InterviewsWorkspace(props: {
   const [interim, setInterim] = useState('')
   const [summary, setSummary] = useState('')
   const [promptText, setPromptText] = useState('')
-  const [recordState, setRecordState] = useState<'idle' | 'requesting' | 'recording' | 'paused' | 'finishing'>('idle')
+  const [recordState, setRecordState] = useState<'idle' | 'requesting' | 'recording' | 'pausing' | 'paused' | 'finishing'>('idle')
+  const recordingTransition = useRef(false)
   const [elapsed, setElapsed] = useState(0)
   const recorder = useRef<MediaRecorder | null>(null)
+  const recorderMimeType = useRef('')
   const stream = useRef<MediaStream | null>(null)
   const chunks = useRef<Blob[]>([])
   const segmentStartedAt = useRef(0)
@@ -58,7 +60,7 @@ export function InterviewsWorkspace(props: {
   const pendingRecording = useRef<{ blob: Blob; content: string; seconds: number } | null>(null)
   const [saveError, setSaveError] = useState('')
 
-  const appendTranscript = (text: string) => setDraft(value => { const next = `${value}${value.trim() ? '\n' : ''}${text}`; draftRef.current = next; return next })
+  const appendTranscript = (text: string) => { const next = `${draftRef.current}${draftRef.current.trim() ? '\n' : ''}${text}`; draftRef.current = next; setDraft(next) }
   const speech = useSpeechRecognition({ continuous: true, onFinal: appendTranscript, onInterim: setInterim })
   const promptSpeech = useSpeechRecognition({ onFinal: text => setPromptText(value => `${value}${value ? ' ' : ''}${text}`) })
 
@@ -80,12 +82,15 @@ export function InterviewsWorkspace(props: {
     try {
       recordingBaseDraft.current = draftRef.current
       const media = await navigator.mediaDevices.getUserMedia({ audio: true }); stream.current = media; chunks.current = []; accumulatedSeconds.current = 0; setElapsed(0)
-      const item = new MediaRecorder(media); item.ondataavailable = event => { if (event.data.size) chunks.current.push(event.data) }; recorder.current = item; item.start(1_000); segmentStartedAt.current = Date.now(); speech.start(); setRecordState('recording')
+      const supportedMimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(type => MediaRecorder.isTypeSupported(type))
+      if (!supportedMimeType) throw new Error('当前浏览器没有可归档的 WebM/MP4 录音格式，请使用 Chrome 或 Safari 最新版。')
+      const item = new MediaRecorder(media, { mimeType: supportedMimeType }); recorderMimeType.current = supportedMimeType; item.ondataavailable = event => { if (event.data.size) chunks.current.push(event.data) }; recorder.current = item; item.start(); segmentStartedAt.current = Date.now(); speech.start(); setRecordState('recording')
     } catch (error) { setRecordState('idle'); stream.current?.getTracks().forEach(track => track.stop()); stream.current = null; window.alert(`无法开始录音：${error instanceof Error ? error.message : '麦克风不可用'}`) }
   }
-  const pause = () => { if (recorder.current?.state === 'recording') recorder.current.pause(); accumulatedSeconds.current += (Date.now() - segmentStartedAt.current) / 1000; speech.pause(); setRecordState('paused'); setElapsed(Math.round(accumulatedSeconds.current)) }
+  const pause = async () => { if (recordingTransition.current || recorder.current?.state !== 'recording') return; recordingTransition.current = true; setRecordState('pausing'); try { recorder.current.pause(); accumulatedSeconds.current += (Date.now() - segmentStartedAt.current) / 1000; await speech.pause(); setRecordState('paused'); setElapsed(Math.round(accumulatedSeconds.current)) } finally { recordingTransition.current = false } }
   const resume = () => { if (recorder.current?.state === 'paused') recorder.current.resume(); segmentStartedAt.current = Date.now(); speech.start(); setRecordState('recording') }
   const discardRecording = () => {
+    if (recordingTransition.current) return
     if (!window.confirm('确认放弃本次录入？本次尚未保存的录音和新增转写将被删除。')) return
     speech.reset()
     const current = recorder.current
@@ -105,9 +110,9 @@ export function InterviewsWorkspace(props: {
   const clearPrompt = () => { promptSpeech.reset(); promptVoiceBase.current = ''; setPromptText('') }
   const stopRecorder = () => new Promise<Blob>((resolve, reject) => {
     const current = recorder.current
-    if (!current || current.state === 'inactive') return resolve(new Blob(chunks.current, { type: current?.mimeType || 'audio/webm' }))
+    if (!current || current.state === 'inactive') return resolve(new Blob(chunks.current, { type: current?.mimeType || chunks.current.find(chunk => chunk.type)?.type || recorderMimeType.current }))
     current.onerror = () => reject(new Error('录音文件生成失败'))
-    current.onstop = () => resolve(new Blob(chunks.current, { type: current.mimeType || 'audio/webm' }))
+    current.onstop = () => resolve(new Blob(chunks.current, { type: current.mimeType || chunks.current.find(chunk => chunk.type)?.type || recorderMimeType.current }))
     current.stop()
   })
   const describeSaveError = (error: unknown) => {
@@ -128,15 +133,16 @@ export function InterviewsWorkspace(props: {
     return true
   }
   const finish = async () => {
-    if (!props.selected) return
+    if (!props.selected || recordingTransition.current) return
+    recordingTransition.current = true
     if (recordState === 'recording') accumulatedSeconds.current += (Date.now() - segmentStartedAt.current) / 1000
-    setRecordState('finishing'); speech.stop(); await new Promise(resolve => window.setTimeout(resolve, 80))
+    setRecordState('finishing'); await speech.stop()
     try {
       const blob = await stopRecorder(); stream.current?.getTracks().forEach(track => track.stop()); stream.current = null; recorder.current = null
       const item = { blob, content: draftRef.current.trim(), seconds: Math.round(accumulatedSeconds.current) }; pendingRecording.current = item
       await persistRecording(item)
       setRecordState('idle'); setElapsed(0); accumulatedSeconds.current = 0; chunks.current = []
-    } catch (error) { setRecordState('paused'); setSaveError(describeSaveError(error)) }
+    } catch (error) { setRecordState('paused'); setSaveError(describeSaveError(error)) } finally { recordingTransition.current = false }
   }
 
   const selected = props.selected
@@ -148,7 +154,7 @@ export function InterviewsWorkspace(props: {
       <Card className="p-4"><div className="flex flex-wrap items-end gap-3"><Field label="访谈安排" className="min-w-64 flex-1"><select className="input" disabled={recordState !== 'idle'} value={selected?.id || ''} onChange={event => props.onSelect(event.target.value)}><option value="">请选择访谈</option>{props.interviews.map(item => <option key={item.id} value={item.id}>{item.title} · {item.scheduledAt ? new Date(item.scheduledAt).toLocaleString('zh-CN') : '未排期'}</option>)}</select></Field><Button disabled={recordState !== 'idle'} onClick={props.onCreate}><Plus className="h-4 w-4" />新建</Button><Button variant="secondary" disabled={!selected || recordState !== 'idle'} onClick={() => { if (selected) setEditDraft({ ...selected, scheduledAt: selected.scheduledAt ? new Date(selected.scheduledAt).toISOString().slice(0, 16) : null }); setEditOpen(true) }}>编辑</Button><Button variant="secondary" disabled={!selected || recordState !== 'idle'} onClick={() => selected && void props.onDelete(selected)}><Trash2 className="h-4 w-4" />删除</Button><Button variant="secondary" disabled={props.interviews.length < 2 || recordState !== 'idle'} onClick={() => { setOrder(props.interviews.map(item => item.id)); setOrderOpen(true) }}>管理顺序</Button></div></Card>
     {!selected ? <Card className="p-8 text-center text-sm text-slate-400">请选择或新建一场访谈。</Card> : <>
       <Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">项目相关材料</h2><p className="mt-1 text-xs text-slate-500">创建访谈时从项目中心导入；在此移除不会删除项目中心原文件。</p></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{projectMaterials.map(item => <div key={item.id} className="flex items-center justify-between rounded-lg border border-slate-200 p-3 text-sm"><a className="min-w-0 truncate text-brand-700" href={`/api/projects/files/${item.fileId}/download`}>{item.name}</a><button className="ml-3 text-rose-500" onClick={() => void props.onRemoveMaterial(item)}><Trash2 className="h-4 w-4" /></button></div>)}{!projectMaterials.length && <p className="text-sm text-slate-400">当前访谈没有项目材料引用。</p>}</div></Card>
-      <Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">录音与实时转写</h2><p className="mt-1 text-xs text-slate-500">浏览器文字实时出现；结束后可用后台 ASR 补转写并人工合并。</p></div><div className="flex flex-wrap gap-2">{recordState === 'idle' && <Button disabled={!props.writeReady} onClick={() => void begin()}><Mic className="h-4 w-4" />开始录入</Button>}{recordState === 'requesting' && <Button disabled>正在申请权限…</Button>}{recordState === 'recording' && <Button variant="secondary" onClick={pause}><Pause className="h-4 w-4" />暂停 {formatTime(elapsed)}</Button>}{recordState === 'paused' && <Button onClick={resume}><Play className="h-4 w-4" />继续录入</Button>}{recordState !== 'idle' && recordState !== 'requesting' && <><Button variant="secondary" disabled={recordState === 'finishing'} onClick={() => void finish()}><Square className="h-4 w-4" />{recordState === 'finishing' ? '正在结束…' : '结束'}</Button><Button variant="secondary" className="text-rose-600" disabled={recordState === 'finishing'} onClick={discardRecording}><Trash2 className="h-4 w-4" />放弃本次</Button></>}</div></div>
+      <Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">录音与实时转写</h2><p className="mt-1 text-xs text-slate-500">浏览器文字实时出现；结束后可用后台 ASR 补转写并人工合并。</p></div><div className="flex flex-wrap gap-2">{recordState === 'idle' && <Button disabled={!props.writeReady} onClick={() => void begin()}><Mic className="h-4 w-4" />开始录入</Button>}{recordState === 'requesting' && <Button disabled>正在申请权限…</Button>}{recordState === 'recording' && <Button variant="secondary" onClick={pause}><Pause className="h-4 w-4" />暂停 {formatTime(elapsed)}</Button>}{recordState === 'pausing' && <Button disabled>正在暂停…</Button>}{recordState === 'paused' && <Button onClick={resume}><Play className="h-4 w-4" />继续录入</Button>}{recordState !== 'idle' && recordState !== 'requesting' && <><Button variant="secondary" disabled={recordState === 'finishing' || recordState === 'pausing'} onClick={() => void finish()}><Square className="h-4 w-4" />{recordState === 'finishing' ? '正在结束…' : '结束'}</Button><Button variant="secondary" className="text-rose-600" disabled={recordState === 'finishing' || recordState === 'pausing'} onClick={discardRecording}><Trash2 className="h-4 w-4" />放弃本次</Button></>}</div></div>
         {speech.error && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{speech.error} 录音不受影响，结束后仍会尝试后台转写。</p>}
         {saveError && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-rose-50 p-3 text-sm text-rose-800"><span>保存未完成：{saveError}。录音和转写仍保留在当前页面。</span><Button size="sm" variant="secondary" disabled={!pendingRecording.current} onClick={() => { const item = pendingRecording.current; if (item) void persistRecording(item).then(ok => { if (ok) { setRecordState('idle'); setElapsed(0); accumulatedSeconds.current = 0; chunks.current = [] } }).catch(error => setSaveError(describeSaveError(error))) }}>重新保存</Button></div>}
         <textarea className="textarea mt-4 min-h-72 w-full" value={draft} onChange={event => { setDraft(event.target.value); draftRef.current = event.target.value }} placeholder="实时转写会持续显示在这里，也可随时手工修订。" />{interim && <p className="mt-2 text-sm text-slate-400">正在识别：{interim}</p>}
