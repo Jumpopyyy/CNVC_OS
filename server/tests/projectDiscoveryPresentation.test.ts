@@ -7,12 +7,37 @@ import {
   compactProjectDiscoveryFactValue,
   filterProjectDiscoveryCandidates,
   loadProjectDiscoveryPage,
+  mergeProjectDiscoveryCandidateEdits,
   parseProjectDiscoveryKeywordText,
   projectDiscoveryDay,
   projectDiscoveryPrimaryDate,
   projectDiscoveryStatusLabel,
   shouldLoadNextProjectDiscoveryPage,
 } from '../../src/lib/projectDiscovery.js'
+
+test('late list responses retain locally saved card and keyword edits without hiding fresh lead data', () => {
+  const current = {
+    ...company,
+    radarProfile: { profile: {
+      discoveryCardEdits: { name: '本地改名' },
+      discoveryKeywords: [{ kind: 'industry', label: '关键词', value: '蓝色关键词' }],
+    } },
+  } as LeadListItem
+  const incoming = {
+    ...company,
+    dataUpdatedAt: '2026-09-22T04:00:00.000Z',
+    radarProfile: { profile: {
+      discoveryCardEdits: { name: '旧名' },
+      discoveryKeywords: [{ kind: 'industry', label: '关键词', value: '旧关键词' }],
+    } },
+  } as LeadListItem
+  const merged = mergeProjectDiscoveryCandidateEdits(incoming, current, { card: true, keywords: true })
+  assert.equal(merged.dataUpdatedAt, incoming.dataUpdatedAt)
+  assert.equal(merged.radarProfile?.profile?.discoveryCardEdits?.name, '本地改名')
+  assert.equal(merged.radarProfile?.profile?.discoveryKeywords?.[0]?.value, '蓝色关键词')
+  assert.equal(incoming.radarProfile?.profile?.discoveryKeywords?.[0]?.value, '旧关键词', '不应修改输入对象')
+  assert.equal(mergeProjectDiscoveryCandidateEdits(incoming, current, {}).radarProfile?.profile?.discoveryKeywords?.[0]?.value, '旧关键词')
+})
 
 const company = {
   id: 'company-1',
