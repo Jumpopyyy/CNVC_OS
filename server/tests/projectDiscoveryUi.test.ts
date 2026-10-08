@@ -55,10 +55,11 @@ test('independent discovery workspace keeps the existing project discovery prese
   assert.match(discovery, /项目负责人/, '项目入库需选择具体负责人')
   assert.match(discovery, /ownerUserId/, '项目入库请求必须提交负责人稳定标识')
   assert.match(discovery, /department/, '项目入库请求必须提交部门')
-  assert.doesNotMatch(discovery, /\/project-discovery\/leads\/\$\{lead\.id\}\/keywords/, '卡片不再展示或编辑重点关键词，原有存量数据仍保留')
+  assert.match(discovery, /\/project-discovery\/leads\/\$\{lead\.id\}\/keywords/, '文本关键词应通过发现池专用接口保存')
   assert.match(discovery, /\/project-discovery\/leads\/\$\{lead\.id\}\/card/, '卡片业务内容必须保存到发现池专用接口')
   assert.match(discovery, /\/project-discovery\/leads\/\$\{lead\.id\}\/defer/, '暂不跟进必须写入发现池专用接口')
-  assert.doesNotMatch(discovery, /project-discovery-keyword-input|编辑关键词|重点关键词/, '新卡片不呈现关键词')
+  assert.match(discovery, /<label[^>]*>重点关键词<\/label>/, '新卡片应显示重点关键词标签')
+  assert.match(discovery, /className="project-discovery-keyword-input"/, '关键词应能在卡片原位置作为文本直接编辑')
   assert.match(discovery, /project-discovery-investment-brief/, '卡片应使用 VC Hunter 同款投资速览区')
   assert.match(discovery, /className="project-discovery-title-input"/, '项目名称应能在卡片原位置直接编辑')
   assert.match(discovery, /className="project-discovery-date-input"/, '融资或公开日期应能在卡片原位置直接编辑')
@@ -75,7 +76,7 @@ test('independent discovery workspace keeps the existing project discovery prese
   assert.doesNotMatch(discovery, /AI 已筛选|待审核/, '卡片顶部不应再显示 AI 已筛选或待审核徽标')
   assert.doesNotMatch(discovery, /projectDiscoveryStatusLabel\(lead\.poolStatus\)/, '卡片顶部应以融资日期取代生命周期徽标')
   assert.match(discovery, /item\.label === '最新融资日期' \|\| item\.label === '公开日期'/, '融资或公开日期应在两栏速览中直接编辑')
-  assert.doesNotMatch(discovery, /buildProjectDiscoveryKeywords\(lead\)/, '卡片不再生成可见关键词')
+  assert.match(discovery, /buildProjectDiscoveryKeywords\(lead\)/, '卡片应展示已有或自动生成的关键词')
   assert.doesNotMatch(discovery, /role="button"/, '卡片整体不应充当按钮，展开与详情操作应使用独立语义按钮')
   assert.match(discoveryCss, /project-discovery-timeline-item/, '全部项目使用统一的整行时间线布局')
   assert.match(discoveryCss, /project-discovery-investment-brief/, '投资速览应有独立的双列卡片样式')
@@ -83,7 +84,7 @@ test('independent discovery workspace keeps the existing project discovery prese
   assert.doesNotMatch(discoveryCss, /project-discovery-keyword-chip/, '关键词不应再保留气泡样式')
   assert.doesNotMatch(discovery, /project-discovery-keyword-editor/, '关键词不应再打开独立编辑面板')
   assert.doesNotMatch(discovery, /keywordKinds/, '关键词编辑不应再提供类型筛选下拉')
-  assert.doesNotMatch(discoveryCss, /project-discovery-keyword-input/, '不再保留关键词布局样式')
+  assert.match(discoveryCss, /\.project-discovery-keyword-input\s*\{[^}]*color:\s*#2d66b5;[^}]*font-weight:\s*700;/s, '关键词文本应加粗并用高对比蓝色突出')
   assert.match(discoveryCss, /project-discovery-assignment-form/, '入库分配应在卡片内完成')
   assert.match(discoveryCss, /\.project-discovery-card-actions\s*\{[^}]*margin-top:\s*auto;/s, '同一行卡片的操作区应统一贴底')
   assert.match(discoveryCss, /\.project-discovery-card-actions button\s*\{[^}]*height:\s*38px;/s, '卡片操作按钮应使用统一固定高度')
@@ -106,7 +107,7 @@ test('discovery workspace keeps lead-pool layout, monitoring controls and people
   assert.match(people, /科研人物线索，不代表创业或融资意愿/)
 })
 
-test('all discovery cards use the compact timeline layout without visible keywords', async () => {
+test('all discovery cards use the compact timeline layout with editable text keywords', async () => {
   const [discovery, css] = await Promise.all([
     read('src/pages/ProjectDiscoveryPage.tsx'),
     read('src/pages/ProjectDiscoveryPage.css'),
@@ -114,7 +115,8 @@ test('all discovery cards use the compact timeline layout without visible keywor
   assert.match(discovery, /candidates\.map\(\(lead\) => <div[^>]*project-discovery-timeline-item/)
   assert.match(css, /\.project-discovery-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/s)
   assert.match(discovery, /function DiscoveryInvestmentBrief[\s\S]*item\.label === '最新融资日期'/)
-  assert.doesNotMatch(discovery, /className="project-discovery-keywords"|className="project-discovery-keyword-input"/)
+  assert.match(discovery, /className="project-discovery-keyword-input"/)
+  assert.match(discovery, /keywordText=\{keywordDraft\}/, '折叠和展开卡片应展示同一个关键词草稿')
   assert.match(discovery, /className=\{`project-discovery-fact-input\$\{item\.label === '核心团队背景' \|\| item\.label === '核心优势' \? ' is-secondary' : ''\}`\}/)
   assert.match(css, /\.project-discovery-fact-input\.is-secondary\s*\{[^}]*font-weight:\s*400/s)
   assert.match(discovery, /\{expanded && <>[\s\S]*<footer className="project-discovery-card-actions">[\s\S]*<CardDetailsToggle expanded/)

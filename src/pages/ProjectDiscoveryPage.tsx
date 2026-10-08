@@ -11,15 +11,20 @@ import { buildSaiDiscoverySnapshot } from '../lib/saiAgent'
 import { LEAD_POOL_INDUSTRIES, LEAD_POOL_REGIONS } from '../lib/leadPoolFilters'
 import {
   buildProjectDiscoveryBrief,
+  buildProjectDiscoveryKeywords,
   compactProjectDiscoveryFactValue,
   discoveryCandidateKind,
+  formatProjectDiscoveryKeywordText,
   loadProjectDiscoveryPage,
+  mergeProjectDiscoveryCandidateEdits,
+  parseProjectDiscoveryKeywordText,
   projectDiscoveryCandidateDay,
   projectDiscoveryDisplayName,
   projectDiscoveryDisplayRegion,
   projectDiscoveryDisplaySourceChannel,
   projectDiscoveryPrimaryDate,
   readProjectDiscoveryCardEdits,
+  type ProjectDiscoveryKeyword,
   type ProjectDiscoveryPeriod,
 } from '../lib/projectDiscovery'
 import type { LeadListResponse } from '../store/useAppStore'
@@ -72,6 +77,9 @@ export function ProjectDiscoveryPage() {
   const requestSerial = useRef(0)
   const moreRequestSerial = useRef(0)
   const candidatesRef = useRef<LeadListItem[]>([])
+  const mutationRevision = useRef(0)
+  const cardRevisionByLead = useRef(new Map<string, number>())
+  const keywordRevisionByLead = useRef(new Map<string, number>())
   const paginationRef = useRef({ page: 1, totalPages: 1 })
   const loadingMoreRef = useRef(false)
   const [candidates, setCandidates] = useState<LeadListItem[]>([])
@@ -116,6 +124,7 @@ export function ProjectDiscoveryPage() {
 
   const loadCandidates = useCallback(async (background = false) => {
     const serial = ++requestSerial.current
+    const requestRevision = mutationRevision.current
     moreRequestSerial.current += 1
     loadingMoreRef.current = false
     setLoadingMore(false)
@@ -130,8 +139,13 @@ export function ProjectDiscoveryPage() {
     try {
       const loaded = await loadProjectDiscoveryPage(fetchProjectDiscoveryPage, 1, [], (items) => {
         if (serial !== requestSerial.current) return
-        candidatesRef.current = items
-        setCandidates(items)
+        const currentById = new Map(candidatesRef.current.map((item) => [item.id, item]))
+        const next = items.map((item) => mergeProjectDiscoveryCandidateEdits(item, currentById.get(item.id), {
+          card: (cardRevisionByLead.current.get(item.id) ?? 0) > requestRevision,
+          keywords: (keywordRevisionByLead.current.get(item.id) ?? 0) > requestRevision,
+        }))
+        candidatesRef.current = next
+        setCandidates(next)
       })
       if (!loaded || serial !== requestSerial.current) return false
       const nextPagination = { page: loaded.page, totalPages: loaded.totalPages }
@@ -151,6 +165,7 @@ export function ProjectDiscoveryPage() {
   const loadRemainingCandidates = useCallback(async () => {
     if (loadingMoreRef.current || paginationRef.current.page >= paginationRef.current.totalPages) return true
     const serial = requestSerial.current
+    const requestRevision = mutationRevision.current
     const moreSerial = ++moreRequestSerial.current
     loadingMoreRef.current = true
     setLoadingMore(true)
@@ -161,8 +176,13 @@ export function ProjectDiscoveryPage() {
         candidatesRef.current,
         (nextItems) => {
           if (serial !== requestSerial.current) return
-          candidatesRef.current = nextItems
-          setCandidates(nextItems)
+          const currentById = new Map(candidatesRef.current.map((item) => [item.id, item]))
+          const next = nextItems.map((item) => mergeProjectDiscoveryCandidateEdits(item, currentById.get(item.id), {
+            card: (cardRevisionByLead.current.get(item.id) ?? 0) > requestRevision,
+            keywords: (keywordRevisionByLead.current.get(item.id) ?? 0) > requestRevision,
+          }))
+          candidatesRef.current = next
+          setCandidates(next)
         },
       )
       if (!loaded || serial !== requestSerial.current) return false
@@ -194,11 +214,25 @@ export function ProjectDiscoveryPage() {
   }
 
   const updateCandidateCard = (leadId: string, card: ProjectDiscoveryCardEdits) => {
+    cardRevisionByLead.current.set(leadId, ++mutationRevision.current)
     const next = candidatesRef.current.map((lead) => lead.id !== leadId ? lead : ({
       ...lead,
       radarProfile: {
         ...lead.radarProfile,
         profile: { ...lead.radarProfile?.profile, discoveryCardEdits: card },
+      },
+    }))
+    candidatesRef.current = next
+    setCandidates(next)
+  }
+
+  const updateCandidateKeywords = (leadId: string, keywords: ProjectDiscoveryKeyword[]) => {
+    keywordRevisionByLead.current.set(leadId, ++mutationRevision.current)
+    const next = candidatesRef.current.map((lead) => lead.id !== leadId ? lead : ({
+      ...lead,
+      radarProfile: {
+        ...lead.radarProfile,
+        profile: { ...lead.radarProfile?.profile, discoveryKeywords: keywords },
       },
     }))
     candidatesRef.current = next
@@ -333,6 +367,7 @@ export function ProjectDiscoveryPage() {
                 lead={lead}
                 onOpen={() => openLead(lead)}
                 onCardUpdated={(card) => updateCandidateCard(lead.id, card)}
+                onKeywordsUpdated={(keywords) => updateCandidateKeywords(lead.id, keywords)}
                 onRemoved={(message) => removeCandidate(lead.id, message)}
               />
             </div>)}</div>}
@@ -343,10 +378,11 @@ export function ProjectDiscoveryPage() {
   </div>
 }
 
-function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
+function DiscoveryCard({ lead, onOpen, onCardUpdated, onKeywordsUpdated, onRemoved }: {
   lead: LeadListItem
   onOpen: () => void
   onCardUpdated: (card: ProjectDiscoveryCardEdits) => void
+  onKeywordsUpdated: (keywords: ProjectDiscoveryKeyword[]) => void
   onRemoved: (message: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -367,6 +403,10 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
   const profile = projectDiscoveryProfile(lead)
   const persistedCard = buildProjectDiscoveryCardDraft(lead, brief, profile)
   const [cardDraft, setCardDraft] = useState<ProjectDiscoveryCardEdits>(() => persistedCard)
+  const persistedKeywords = buildProjectDiscoveryKeywords(lead)
+  const persistedKeywordText = formatProjectDiscoveryKeywordText(persistedKeywords)
+  const [keywordDraft, setKeywordDraft] = useState(persistedKeywordText)
+  const previousPersistedKeywordText = useRef(persistedKeywordText)
   const missingFields = projectDiscoveryMissingFields(lead).filter((field) => !(
     cardDraft.briefFacts[field]?.trim() || cardDraft.profileFacts[field]?.trim()
   ))
@@ -383,12 +423,18 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
   const applicableDimensions = kind === 'research' ? research?.dataStatus?.applicableDimensions : investment?.dataStatus?.applicableDimensions
   const eligiblePeople = assignmentOptions?.people.filter((person) => person.department === selectedDepartment) ?? []
   const cardDirty = JSON.stringify(cardDraft) !== JSON.stringify(persistedCard)
+  const keywordDirty = keywordDraft !== persistedKeywordText
   const investorNames = [...new Set((cardDraft.briefFacts['投资方'] ?? '').split(/[、,，;；\n]+/u)
     .map((value) => value.trim())
     .filter((value) => value && !['未披露', '待补充', '待核验'].includes(value)))]
   const persistedCardKey = JSON.stringify(readProjectDiscoveryCardEdits(lead) ?? null)
 
   useEffect(() => setCardDraft(persistedCard), [persistedCardKey])
+  useEffect(() => {
+    const previous = previousPersistedKeywordText.current
+    previousPersistedKeywordText.current = persistedKeywordText
+    setKeywordDraft((current) => current === previous ? persistedKeywordText : current)
+  }, [persistedKeywordText])
 
   const updateCardDraft = <Key extends keyof ProjectDiscoveryCardEdits>(key: Key, value: ProjectDiscoveryCardEdits[Key]) => {
     setCardDraft((current) => ({ ...current, [key]: value }))
@@ -403,24 +449,44 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
   }
 
   const saveCard = async () => {
-    if (!cardDirty || cardAction) return
-    if (!cardDraft.name.trim()) {
+    if ((!cardDirty && !keywordDirty) || cardAction) return
+    if (cardDirty && !cardDraft.name.trim()) {
       setCardError('项目名称不能为空。')
+      return
+    }
+    let parsedKeywords: ProjectDiscoveryKeyword[] | null = null
+    try {
+      if (keywordDirty) parsedKeywords = parseProjectDiscoveryKeywordText(keywordDraft, persistedKeywords)
+    } catch (cause) {
+      setCardError(cause instanceof Error ? cause.message : '重点关键词格式不正确。')
       return
     }
     setCardAction('card')
     setCardError('')
     setCardNotice('')
+    let cardSaved = false
     try {
-      const result = await apiPatch<{ leadId: string; card: ProjectDiscoveryCardEdits }>(
-        `/project-discovery/leads/${lead.id}/card`,
-        cardDraft,
-      )
-      setCardDraft(result.card)
-      onCardUpdated(result.card)
+      if (cardDirty) {
+        const result = await apiPatch<{ leadId: string; card: ProjectDiscoveryCardEdits }>(
+          `/project-discovery/leads/${lead.id}/card`,
+          cardDraft,
+        )
+        setCardDraft(result.card)
+        onCardUpdated(result.card)
+        cardSaved = true
+      }
+      if (parsedKeywords) {
+        const result = await apiPatch<{ leadId: string; keywords: ProjectDiscoveryKeyword[] }>(
+          `/project-discovery/leads/${lead.id}/keywords`,
+          { keywords: parsedKeywords },
+        )
+        setKeywordDraft(formatProjectDiscoveryKeywordText(result.keywords))
+        onKeywordsUpdated(result.keywords)
+      }
       setCardNotice('卡片内容已保存。')
     } catch (cause) {
-      setCardError(cause instanceof Error ? cause.message : '卡片内容保存失败，请重试。')
+      const message = cause instanceof Error ? cause.message : '卡片内容保存失败，请重试。'
+      setCardError(cardSaved ? `卡片其他修改已保存，重点关键词保存失败：${message}` : message)
     } finally {
       setCardAction('')
     }
@@ -499,9 +565,11 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
       name={name}
       brief={brief}
       factValues={cardDraft.briefFacts}
+      keywordText={keywordDraft}
       primaryDate={cardDraft.primaryDate}
       saving={cardAction === 'card'}
       onFactChange={(label, value) => updateCardFact('briefFacts', label, value)}
+      onKeywordChange={(value) => { setKeywordDraft(value); setCardError(''); setCardNotice('') }}
       onDateChange={(value) => updateCardDraft('primaryDate', value)}
     />
     {!expanded && <CardDetailsToggle expanded={false} name={name} onToggle={() => setExpanded(true)} />}
@@ -574,10 +642,10 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onRemoved }: {
           </div>}
       </section>
     </>}
-    {cardDirty && <div className="project-discovery-card-save" role="status">
+    {(cardDirty || keywordDirty) && <div className="project-discovery-card-save" role="status">
       <span>{cardAction === 'card' ? '正在保存卡片内容…' : '卡片内容已修改'}</span>
       <div>
-        <button type="button" disabled={cardAction === 'card'} onClick={() => { setCardDraft(persistedCard); setCardError(''); setCardNotice('') }}>取消修改</button>
+        <button type="button" disabled={cardAction === 'card'} onClick={() => { setCardDraft(persistedCard); setKeywordDraft(persistedKeywordText); setCardError(''); setCardNotice('') }}>取消修改</button>
         <button type="button" disabled={cardAction === 'card'} onClick={() => void saveCard()}>{cardAction === 'card' ? '保存中' : '保存卡片'}</button>
       </div>
     </div>}
@@ -634,14 +702,16 @@ function CardDetailsToggle({ expanded, name, onToggle }: { expanded: boolean; na
   </button>
 }
 
-function DiscoveryInvestmentBrief({ leadId, name, brief, factValues, primaryDate, saving, onFactChange, onDateChange }: {
+function DiscoveryInvestmentBrief({ leadId, name, brief, factValues, keywordText, primaryDate, saving, onFactChange, onKeywordChange, onDateChange }: {
   leadId: string
   name: string
   brief: ReturnType<typeof buildProjectDiscoveryBrief>
   factValues: Record<string, string>
+  keywordText: string
   primaryDate: string
   saving: boolean
   onFactChange: (label: string, value: string) => void
+  onKeywordChange: (value: string) => void
   onDateChange: (value: string) => void
 }) {
   return <section aria-label={`${name}投资速览`} className="project-discovery-investment-brief">
@@ -666,7 +736,20 @@ function DiscoveryInvestmentBrief({ leadId, name, brief, factValues, primaryDate
             onChange={(event) => onFactChange(item.label, event.target.value)}
           />}</dd>
         </div>
-    })}</dl>
+        })}
+      <div className="wide project-discovery-keyword-row">
+        <dt><label htmlFor={`discovery-keywords-${leadId}`}>重点关键词</label></dt>
+        <dd><textarea
+          id={`discovery-keywords-${leadId}`}
+          className="project-discovery-keyword-input"
+          value={keywordText}
+          rows={1}
+          maxLength={800}
+          disabled={saving}
+          placeholder="输入关键词，使用顿号分隔"
+          onChange={(event) => onKeywordChange(event.target.value)}
+        /></dd>
+      </div></dl>
   </section>
 }
 
