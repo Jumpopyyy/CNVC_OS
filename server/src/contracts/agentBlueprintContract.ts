@@ -44,6 +44,8 @@ export type AgentBlueprintNodeContext = { input: string; previous: string; outpu
 export type AgentBlueprintRecord = {
   id: string
   version: number
+  visibility?: 'private' | 'organization'
+  ownerUserId?: string
   blueprint: AgentBlueprint
   createdAt: string
   updatedAt: string

@@ -23,6 +23,12 @@ function actor(req: AuthedRequest): AiCapabilityActor {
 const version = z.number().int().min(1)
 const uuid = z.string().uuid()
 const variablesSchema = z.record(z.string().max(48), z.string().max(60_000)).refine((value) => Object.keys(value).length <= 8, '变量最多 8 项')
+agentBlueprintsRouter.get('/shared', async (req: AuthedRequest, res, next) => {
+  try { const { listCallableAgentBlueprints } = await import('../repositories/agentBlueprintRepository.js'); res.json({ list: await listCallableAgentBlueprints(actor(req)) }) } catch (error) { next(error) }
+})
+agentBlueprintsRouter.patch('/:id/sharing', async (req: AuthedRequest, res, next) => {
+  try { const body = z.object({ expectedVersion: version, visibility: z.enum(['private', 'organization']) }).strict().parse(req.body); const { setAgentBlueprintSharing } = await import('../repositories/agentBlueprintRepository.js'); res.json(await setAgentBlueprintSharing(actor(req), uuid.parse(req.params.id), body.expectedVersion, body.visibility)) } catch (error) { next(error) }
+})
 agentBlueprintsRouter.get('/catalog', async (req: AuthedRequest, res, next) => {
   try { res.json(await operations.catalog(actor(req))) } catch (error) { next(error) }
 })

@@ -193,7 +193,7 @@ export async function getAgentBlueprintCatalog(actor: AiCapabilityActor, depende
   const { models, skills } = await (dependencies?.resources ?? authorizedResources)(actor)
   return { models: models.map((model) => ({ id: model.id, name: model.displayName, modelKey: model.modelKey })), skills: skills.map((skill) => ({ id: skill.id, name: skill.name, description: skill.description ?? '', executionMode: 'instructions-only' })) }
 }
-async function skillInstructions(skill: Awaited<ReturnType<typeof authorizedResources>>['skills'][number]) {
+export async function skillInstructions(skill: Awaited<ReturnType<typeof authorizedResources>>['skills'][number]) {
   if (skill.source === 'uploaded') {
     const text = skill.config.instructions
     if (typeof text !== 'string' || !text.trim() || text.length > 64_000) fail('Skill 指令缺失或超过可加载限制', 400, 'AGENT_BLUEPRINT_SKILL_INVALID')

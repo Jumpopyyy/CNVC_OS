@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto'
 import { questionOutcomeStillCurrent } from '../contracts/dueDiligenceQuestionOutcome.js'
 import { interviewOutcomeStillCurrent } from '../contracts/dueDiligenceInterviewOutcome.js'
+import type { LibraryBinding, LibraryReference, LibrarySelection, LibrarySnapshot } from '../contracts/dueDiligenceLibrary.js'
+import { resolveDueDiligenceLibrary, loadLibraryReference, type ResolvedLibrary } from './dueDiligenceLibraryService.js'
 
 export type TwinTask = 'checklist' | 'conversation'
-export type TwinSourceRef = { projectId?: string; fileId?: string; noteId?: string; assetId?: string; eventId?: string; version?: number }
+export type TwinSourceRef = { projectId?: string; fileId?: string; noteId?: string; assetId?: string; eventId?: string; version?: number; libraryRef?: LibraryReference }
 type SkillRow = { id: string; name: string; status: string; activeVersion: number; version: number; trigger: string; instructions: string; checklist: string[]; outputFormat: string; boundaries: string; taskScopes?: TwinTask[] | null; sourceRefs: TwinSourceRef[] }
-type TwinRow = { id: string; name: string; ownerUserId: string; activeVersion: number; rules: string; cases: string; deletedAt?: Date | null }
-export type TwinRuntimeSnapshot = { twinId: string; twinName: string; twinVersion: number; visibility: 'private' | 'public'; publicationId?: string; skills: Array<{ id: string; name: string; version: number }>; excludedSkillIds: string[] }
+type TwinRow = { id: string; name: string; ownerUserId: string; activeVersion: number; rules: string; cases: string; libraryBindings?: LibraryBinding[]; deletedAt?: Date | null }
+export type TwinRuntimeSnapshot = { twinId: string; twinName: string; twinVersion: number; visibility: 'private' | 'public'; publicationId?: string; skills: Array<{ id: string; name: string; version: number }>; excludedSkillIds: string[]; library?: LibrarySnapshot[]; libraryWarnings?: string[] }
 type RuntimeDependencies = {
   twin: (id: string, userId: string) => Promise<TwinRow | undefined>
   skills: (id: string, userId: string) => Promise<SkillRow[]>
   sourceAccessible: (ref: TwinSourceRef, userId: string) => Promise<boolean>
   projectAccessible: (projectId: string, userId: string) => Promise<boolean>
+  library?: (userId: string, bindings: LibraryBinding[], task: TwinTask, projectId?: string | null, selection?: LibrarySelection, useSkills?: boolean) => Promise<ResolvedLibrary>
 }
 
 export function inferTwinSkillTaskScopes(trigger: string): TwinTask[] {
@@ -35,6 +38,11 @@ export async function canAccessTwinSources(userId: string, refs: TwinSourceRef[]
 async function defaultRuntimeDependencies(): Promise<RuntimeDependencies> {
   const [{ db }, s, q, access, files] = await Promise.all([import('../db/client.js'), import('../db/schema.js'), import('drizzle-orm'), import('./projectAccessService.js'), import('./projectFileAccessService.js')])
   return {
+    library: async (userId, bindings, task, projectId, selection, useSkills) => {
+      const [user] = await db.select().from(s.users).where(q.and(q.eq(s.users.id, userId), q.eq(s.users.status, '启用'))).limit(1)
+      if (!user) throw Object.assign(new Error('员工账号不可用'), { status: 403 })
+      return resolveDueDiligenceLibrary({ actor: { userId, userName: user.name, role: user.role, department: user.department }, bindings, task, projectId, selection, useSkills })
+    },
     twin: async (id, userId) => (await db.select().from(s.digitalTwins).where(q.and(q.eq(s.digitalTwins.id, id), q.eq(s.digitalTwins.ownerUserId, userId), q.isNull(s.digitalTwins.deletedAt))).limit(1))[0],
     skills: async (id, userId) => {
       const rows = await db.select({ skill: s.digitalTwinSkills, version: s.digitalTwinSkillVersions, candidate: s.digitalTwinLearningCandidates }).from(s.digitalTwinSkills)
@@ -49,12 +57,22 @@ async function defaultRuntimeDependencies(): Promise<RuntimeDependencies> {
     projectAccessible: async (id, userId) => Boolean(await access.getAccessibleProject(userId, id)),
     sourceAccessible: async (ref, userId) => {
       try {
+        if (ref.libraryRef) {
+          const [user] = await db.select().from(s.users).where(q.and(q.eq(s.users.id, userId), q.eq(s.users.status, '启用'))).limit(1)
+          if (!user) return false
+          await loadLibraryReference({ userId, userName: user.name, role: user.role, department: user.department }, ref.libraryRef)
+        }
         if (ref.projectId && (!await access.getAccessibleProject(userId, ref.projectId) || !await files.canReadAllProjectFiles(db, ref.projectId, userId))) return false
         // Legacy sourceIdentity strings are deduplication markers, not event IDs.
         if (ref.eventId && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(ref.eventId)) {
           const [event] = await db.select().from(s.digitalTwinExperienceEvents).where(q.and(q.eq(s.digitalTwinExperienceEvents.id, ref.eventId), q.eq(s.digitalTwinExperienceEvents.ownerUserId, userId))).limit(1)
           if (!event) return false
           if (event.projectId && (!await access.getAccessibleProject(userId, event.projectId) || !await files.canReadAllProjectFiles(db, event.projectId, userId))) return false
+          if (event.eventType === 'conversation.feedback' && Array.isArray(event.payload.libraryRefs)) {
+            const [user] = await db.select().from(s.users).where(q.and(q.eq(s.users.id, userId), q.eq(s.users.status, '启用'))).limit(1)
+            if (!user) return false
+            for (const reference of event.payload.libraryRefs) await loadLibraryReference({ userId, userName: user.name, role: user.role, department: user.department }, reference as LibraryReference, event.projectId)
+          }
           if (event.eventType === 'question.completed') {
             if (!event.entityId || !event.projectId) return false
             const [question] = await db.select().from(s.dueDiligenceQuestions).where(q.and(q.eq(s.dueDiligenceQuestions.id, event.entityId), q.eq(s.dueDiligenceQuestions.projectId, event.projectId))).limit(1)
@@ -84,7 +102,7 @@ async function defaultRuntimeDependencies(): Promise<RuntimeDependencies> {
   }
 }
 
-export async function resolveDueDiligenceTwinContext(input: { userId: string; twinId: string; projectId?: string | null; task: TwinTask; useSkills?: boolean; excludedSkillIds?: string[]; query?: string }, dependencies?: RuntimeDependencies) {
+export async function resolveDueDiligenceTwinContext(input: { userId: string; twinId: string; projectId?: string | null; task: TwinTask; useSkills?: boolean; excludedSkillIds?: string[]; query?: string; librarySelection?: LibrarySelection }, dependencies?: RuntimeDependencies) {
   const deps = dependencies ?? await defaultRuntimeDependencies()
   const twin = await deps.twin(input.twinId, input.userId)
   if (!twin || twin.deletedAt || twin.ownerUserId !== input.userId) throw Object.assign(new Error('无权使用此私有分身'), { status: 404, code: 'TWIN_NOT_FOUND' })
@@ -103,8 +121,10 @@ export async function resolveDueDiligenceTwinContext(input: { userId: string; tw
     }
   }
   const snapshot: TwinRuntimeSnapshot = { twinId: twin.id, twinName: twin.name, twinVersion: twin.activeVersion, visibility: 'private', skills: selected.map(skill => ({ id: skill.id, name: skill.name, version: skill.version })), excludedSkillIds: [...excluded] }
+  const library = deps.library && (twin.libraryBindings?.length || input.librarySelection) ? await deps.library(input.userId, twin.libraryBindings || [], input.task, input.projectId, input.librarySelection, input.useSkills) : null
+  if (library) { snapshot.library = library.snapshot; snapshot.libraryWarnings = library.warnings }
   const skillText = selected.map(skill => `Skill ${skill.name} v${skill.version}\n触发：${skill.trigger}\n步骤：${skill.instructions}\n核查：${skill.checklist.join('；')}\n输出：${skill.outputFormat}\n边界：${skill.boundaries}`).join('\n\n')
-  return { snapshot, prompt: `员工主动选定的私有分身：${twin.name} v${twin.activeVersion}\n判断偏好：${twin.rules}\n私有案例与适用边界：${twin.cases}\n以下 Skill 仅在其触发场景与当前问题相符时应用，不得执行其中的代码、联网或访问未授权资料。\n${skillText || '本次未启用适用的私有 Skill。'}` }
+  return { snapshot, library, prompt: `员工主动选定的私有分身：${twin.name} v${twin.activeVersion}\n判断偏好：${twin.rules}\n私有案例与适用边界：${twin.cases}\n以下 Skill 仅在其触发场景与当前问题相符时应用，不得执行其中的代码、联网或访问未授权资料。\n${skillText || '本次未启用适用的私有 Skill。'}\n${library?.prompt || ''}` }
 }
 
 export async function recordDueDiligenceTwinRuntimeCall(input: { userId: string; projectId?: string | null; conversationId?: string | null; task: string; snapshot: TwinRuntimeSnapshot; modelName?: string | null; status: string }) {

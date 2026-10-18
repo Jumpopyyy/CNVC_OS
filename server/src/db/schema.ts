@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mysqlTableCreator, text, longtext, customType, int, bigint, boolean, json, varchar, date, index, uniqueIndex, foreignKey, check } from 'drizzle-orm/mysql-core'
 import { sql } from 'drizzle-orm'
 import { mysqlConfig } from './config.js'
+import type { LibraryBinding, LibraryReference } from '../contracts/dueDiligenceLibrary.js'
 import { currentRequestId } from '../runtime/structuredLogger.js'
 import type { FdeWorkflowPolicyConfig } from '../contracts/fdeWorkflowPolicyContract.js'
 import type { TypePolicyDefinition, TypePolicyReceipt } from '../contracts/fdeTypePolicyContract.js'
@@ -893,6 +894,7 @@ export const digitalTwins = mysqlTable('digital_twins', {
   role: varchar('role', { length: 64 }).notNull(),
   rules: longtext('rules').notNull(),
   cases: longtext('cases').notNull(),
+  libraryBindings: json('library_bindings').$type<LibraryBinding[]>().notNull().default(emptyJsonArray),
   description: varchar('description', { length: 1000 }).notNull().default(''),
   descriptionMode: varchar('description_mode', { length: 16 }).notNull().default('auto'),
   avatarKind: varchar('avatar_kind', { length: 16 }).notNull().default('preset'),
@@ -941,6 +943,7 @@ export const digitalTwinVersions = mysqlTable('digital_twin_versions', {
   version: int('version').notNull(),
   rules: longtext('rules').notNull(),
   cases: longtext('cases').notNull(),
+  libraryBindings: json('library_bindings').$type<LibraryBinding[]>().notNull().default(emptyJsonArray),
   skillSnapshot: json('skill_snapshot').$type<Array<{ id: string; version: number; enabled: boolean }>>(),
   source: varchar('source', { length: 16 }).notNull().default('manual'),
   createdAt: timestampColumn('created_at').notNull().default(sql`CURRENT_TIMESTAMP(3)`),
@@ -1006,7 +1009,7 @@ export const digitalTwinSkillImports = mysqlTable('digital_twin_skill_imports', 
 
 export const digitalTwinSkillVersions = mysqlTable('digital_twin_skill_versions', {
   id: uuidPrimaryKey('id'), skillId: uuidColumn('skill_id').notNull().references(() => digitalTwinSkills.id, { onDelete: 'cascade' }), version: int('version').notNull(),
-  sourceRefs: json('source_refs').$type<Array<{ projectId?: string; fileId?: string; noteId?: string; assetId?: string; eventId?: string; version?: number }>>(), taskScopes: json('task_scopes').$type<Array<'checklist' | 'conversation'>>(),
+  sourceRefs: json('source_refs').$type<Array<{ projectId?: string; fileId?: string; noteId?: string; assetId?: string; eventId?: string; version?: number; libraryRef?: LibraryReference }>>(), taskScopes: json('task_scopes').$type<Array<'checklist' | 'conversation'>>(),
   trigger: text('trigger').notNull(), instructions: longtext('instructions').notNull(), checklist: json('checklist').$type<string[]>().notNull().default(emptyJsonArray), outputFormat: text('output_format').notNull(), boundaries: text('boundaries').notNull(), sourceCandidateId: uuidColumn('source_candidate_id').references(() => digitalTwinLearningCandidates.id, { onDelete: 'set null' }), status: varchar('status', { length: 16 }).notNull().default('试用中'), createdAt: timestampColumn('created_at').notNull().default(sql`CURRENT_TIMESTAMP(3)`),
 }, (t) => ({ uniqueVersion: uniqueIndex('uq_twin_skill_version').on(t.skillId, t.version) }))
 

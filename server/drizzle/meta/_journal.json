@@ -866,6 +866,8 @@
     { "idx": 138, "version": "5", "when": 1793432967000, "tag": "0138_due_diligence_twin_runtime", "breakpoints": true
     },
     { "idx": 139, "version": "5", "when": 1793432968000, "tag": "0139_digital_twin_builder_and_knowledge", "breakpoints": true
+    },
+    { "idx": 140, "version": "5", "when": 1793432969000, "tag": "0140_due_diligence_library_bindings", "breakpoints": true
     }
   ]
 }

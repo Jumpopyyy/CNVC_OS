@@ -2,7 +2,7 @@ import { db } from '../db/client.js'
 import { digitalTwinBuildSessions, digitalTwinInquiries, digitalTwinProjectKnowledge } from '../db/schema.js'
 import { digitalTwins, digitalTwinPrivateAssets, digitalTwinSkillImports, digitalTwinSkillVersions, digitalTwinPublications, digitalTwinLearningCandidates, digitalTwinVersions, digitalTwinDialogueSessions, digitalTwinRuntimeCalls, dueDiligenceTranscriptionJobs, dueDiligenceRecordingSessions, dueDiligenceRecordingChunks, dueDiligenceArtifactTasks, dueDiligenceQuestions, dueDiligenceQuestionEvidence, dueDiligenceQuestionPacks } from '../db/schema.js'
 
-export const DUE_DILIGENCE_SCHEMA_VERSION = '0139_digital_twin_builder_and_knowledge'
+export const DUE_DILIGENCE_SCHEMA_VERSION = '0140_due_diligence_library_bindings'
 
 /** Probe actual columns, not just the migration journal. No DDL or data writes. */
 export async function checkDueDiligenceSchema() {
@@ -24,6 +24,8 @@ export async function checkDueDiligenceSchema() {
     db.select({ scope: digitalTwinDialogueSessions.scopeKey }).from(digitalTwinDialogueSessions).limit(1),
     db.select({ snapshot: digitalTwinRuntimeCalls.snapshot }).from(digitalTwinRuntimeCalls).limit(1),
     db.select({ description: digitalTwins.description, mode: digitalTwins.descriptionMode }).from(digitalTwins).limit(1),
+    db.select({ bindings: digitalTwins.libraryBindings }).from(digitalTwins).limit(1),
+    db.select({ bindings: digitalTwinVersions.libraryBindings }).from(digitalTwinVersions).limit(1),
     db.select({ id: digitalTwinBuildSessions.id }).from(digitalTwinBuildSessions).limit(1),
     db.select({ id: digitalTwinInquiries.id }).from(digitalTwinInquiries).limit(1),
     db.select({ id: digitalTwinProjectKnowledge.id }).from(digitalTwinProjectKnowledge).limit(1),
