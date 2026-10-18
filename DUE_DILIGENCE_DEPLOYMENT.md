@@ -4,7 +4,7 @@
 
 ## 必做项
 
-1. 合并 PR 后拉取最新 `main`，安装锁定依赖并执行项目原有的数据库迁移流程，确认已应用 `0134_add_twin_avatars_and_skill_library.sql` 及之前所有迁移。
+1. 发布前核对最新 `main` 与服务器现有版本；本地安装锁定依赖、完成测试并生成候选构建。备份数据库与项目文件存储后，在授权维护窗口执行项目原有迁移流程，确认已应用 `0139_digital_twin_builder_and_knowledge.sql` 及之前所有迁移。保留生产已经应用的 0135（项目权限），本轮追加 0136（分片录音与产物任务）、0137（逐题材料依据）、0138（分身调用、会话与学习来源）、0139（构建对话、分身说明、项目问询及补充记录）；不能只执行最后一条，也不要手工创建同名表。旧独立开发库的同号迁移与此生产序列不同，不能直接用本序列连接旧演示库或伪造迁移记录。
 2. 生产环境设置：
 
    ```env
@@ -21,13 +21,16 @@
    proxy_set_header X-Forwarded-Proto $scheme;
    ```
 
-4. 重新构建并重启服务，再执行：
+4. 生产不运行构建、全量验收或长录音压力测试。在授权发布窗口部署同一批次的前后端候选构建，沿用平台单服务发布与回退流程，再执行只读检查：
 
    ```bash
    npm run check:due-diligence-readiness
    ```
 
-   `production-origin` 和 `database-schema-0134` 必须为 `ready: true`。
+   `production-origin` 和 `database-schema-0139` 必须为 `ready: true`。模型字段“已配置”只证明路由存在，不能代替实际调用验收。
+
+5. 保留现有 `PROJECT_FILE_ROOT` 持久卷及目录权限，分片写入其 `.dd-recordings` 子目录；不要把它放进会随发布清空的临时目录。单场上限 8 小时、1 GB，每次二进制请求最多 2 MB，反向代理须允许这类请求，但无需放宽为 1 GB 单请求。确认磁盘余量、上传超时及备份策略；完整产物与待恢复分片均属于受控业务数据。
+6. 现有后台调度器自动注册 `due-diligence-artifact-worker`，默认串行处理录音归档、纪要分段和经验提炼。无需另装 worker 或新增模型密钥。仍需在管理员运维界面确认任务有心跳、可前进，不能只看网页返回 200。
 
 ## 模型配置
 
@@ -45,19 +48,24 @@
 ```env
 ASR_BASE_URL=https://your-asr-provider.example/v1
 ASR_API_KEY=server-side-secret
-ASR_MODEL=whisper-1
+ASR_MODEL=provider-audio-transcription-model
 ```
 
-ASR 未配置不会阻断录音、浏览器文字和人工修订。
+ASR 未配置不会阻断录音、浏览器文字和人工修订。上例为占位值，必须替换为企业实际开通的服务与音频模型；文字聊天模型不是音频转写服务。录音归档上限与供应商转写上限分开：本轮可分片保存 1 GB 文件，通用后台转写仍默认限制 25 MB，超限会保留录音并提示，不能认定长录音企业 ASR 已接入。
 
 ## 合并后冒烟验证
 
-- 打开 `/due-diligence`，顶部显示“数据库就绪”和“写入来源正常”。
+- 打开 `/due-diligence`，管理员在“管理员诊断”中检查数据库和写入来源；普通员工不显示技术诊断。
 - 新建数字分身，刷新后仍存在；可公开、取消公开、删除。
 - 切换分身时“沉淀的 Skill 库”只显示当前分身内容。
 - 开始录音前不出现来源错误；结束后录音与转写均可保存。
 - 标准模式可生成清单；模型就绪后再验证智能增强和 Agent 对话。
+- 编辑清单后导出当前 Word，核对顺序及最新内容；重复生成不覆盖人工修改。
+- 两个授权员工在同一合成测试访谈验证转写版本同步和插问；现场端不丢草稿、不停录音。
+- 采纳经验形成私有 Skill，开启/停用后核对调用版本记录；公开预览不包含案例和私有 Skill。
+
+本轮本地验收记录与剩余发布门槛见 `DUE_DILIGENCE_ACCEPTANCE_20261013.md`；不要把隔离测试通过等同于正式环境已验收。
 
 ## 可直接发给负责部署同事的指令
 
-> 请在合并尽调工作台修复 PR 后，同时部署前端与 Node 服务，执行全部数据库迁移并确认已应用 0134。设置 `AUTH_ALLOWED_ORIGINS=https://cybernaut.newmin.cn` 和 `AUTH_COOKIE_SECURE=true`，确认反向代理传递 `Host`、`X-Forwarded-Host` 与 `X-Forwarded-Proto`。在平台 AI 模型配置中启用 `ai-document` 和 `interactive-assistant` 路由，然后运行 `npm run check:due-diligence-readiness`，并按 `DUE_DILIGENCE_DEPLOYMENT.md` 完成冒烟验证。
+> 请先审阅本轮验收记录，在本地或隔离环境完成验证和构建；不要在生产构建或做压力测试。备份并在授权发布窗口将同一批次前端与 Node 服务部署到原平台，保留已执行的权限迁移 0135，再执行追加迁移至 0139，保留项目文件持久卷和原有端口。若出现重复字段等迁移漂移，应停止发布并逐项核查，不跳过迁移或盲补记录。确认生产可信域名及反向代理协议/域名转发，复用平台 `ai-document` 与 `interactive-assistant` 路由，运行 `npm run check:due-diligence-readiness` 并检查尽调后台任务。最后使用合成资料低负载验证清单、分身和访谈；企业 ASR 未开通时如实保持未配置。失败按原发布回退方案处理，不删迁移和业务数据。

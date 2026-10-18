@@ -134,6 +134,20 @@ export async function listProjectRecords(projectId: string, userId: string, raw:
     return { list: rows.map(({ row, authorName }) => present(row, scope, authorName, counts.find(item => item.id === row.id)?.value ?? 0)), total: total.value, page: input.page, pageSize: input.pageSize, canCreate: scope.canCreate }
   })
 }
+
+// Digital twins use the same business-record permissions as the project workspace.
+// An administrator's project visibility alone must not grant access to these records.
+export async function readEmployeeProjectRecords(projectId: string, authorId: string, viewerId: string) {
+  return run(projectId, viewerId, false, async (tx) => {
+    if (authorId !== viewerId) await context(tx, projectId, authorId)
+    const records = await tx.select().from(projectRecords).where(and(
+      eq(projectRecords.projectId, projectId), eq(projectRecords.authorId, authorId),
+      inArray(projectRecords.status, ['published', 'archived']),
+    )).orderBy(desc(projectRecords.updatedAt), desc(projectRecords.id)).limit(501)
+    if (records.length > 500) return fail('TWIN_RECORD_SOURCE_LIMIT', '员工项目记录超过单次查询容量，未截断生成；请联系管理员调整检索配置', 422)
+    return records
+  })
+}
 export async function getProjectRecord(projectId: string, id: string, userId: string, raw: unknown = {}) {
   const input = projectRecordDetailQuery.parse(raw)
   return run(projectId, userId, false, async (tx, scope) => {

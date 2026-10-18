@@ -858,6 +858,14 @@
     { "idx": 134, "version": "5", "when": 1793432963000, "tag": "0134_add_twin_avatars_and_skill_library", "breakpoints": true
     },
     { "idx": 135, "version": "5", "when": 1793432964000, "tag": "0135_add_project_management_access", "breakpoints": true
+    },
+    { "idx": 136, "version": "5", "when": 1793432965000, "tag": "0136_due_diligence_recording_sessions", "breakpoints": true
+    },
+    { "idx": 137, "version": "5", "when": 1793432966000, "tag": "0137_due_diligence_question_evidence", "breakpoints": true
+    },
+    { "idx": 138, "version": "5", "when": 1793432967000, "tag": "0138_due_diligence_twin_runtime", "breakpoints": true
+    },
+    { "idx": 139, "version": "5", "when": 1793432968000, "tag": "0139_digital_twin_builder_and_knowledge", "breakpoints": true
     }
   ]
 }

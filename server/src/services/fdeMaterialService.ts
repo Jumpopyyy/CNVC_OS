@@ -134,7 +134,9 @@ export async function resolveMaterialRequest(projectId: string, userId: string, 
 
 export async function createMaterialSubmission(projectId: string, userId: string, raw: unknown) {
   const input = materialCreateCommand.parse(raw), hash = digest({ projectId, userId, action: 'submit', input })
-  return run(projectId, userId, true, async (tx, scope) => {
+  const learning = await import('./dueDiligenceTwinLearningService.js')
+  const twinId = await learning.captureFormalTwinLearningTarget(userId).catch(() => null)
+  const result = await run(projectId, userId, true, async (tx, scope) => {
     if (!scope.canSubmit) return fail('MATERIAL_SUBMIT_FORBIDDEN', '当前项目状态或角色不能发起材料送审', 403)
     const prior = await replay(tx, projectId, userId, input.clientRequestId, hash); if (prior) return prior
     if (scope.project.version !== input.expectedProjectVersion || scope.project.governanceVersion !== input.expectedGovernanceVersion) return fail('VERSION_CONFLICT', '项目阶段或人员已变化，请刷新接收人后重试')
@@ -179,6 +181,10 @@ export async function createMaterialSubmission(projectId: string, userId: string
     await record(tx, await find(tx, projectId, id), userId, input.previousSubmissionId ? 'resubmit' : 'submit', '材料送审及站内投递已保存', input.clientRequestId, hash)
     return { id }
   })
+  // Capture the selected twin before the business operation; extraction is
+  // asynchronous and must never prevent a successful formal submission.
+  void learning.recordFormalTwinMaterialSubmission({submissionId:result.id,ownerUserId:userId,twinId}).catch(() => console.warn('[due-diligence] formal learning event not recorded'))
+  return result
 }
 
 export async function readMaterialSubmission(projectId: string, id: string, userId: string, raw: unknown) {

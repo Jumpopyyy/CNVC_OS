@@ -189,8 +189,10 @@ function portOpen(port) {
     }
     socket.setTimeout(500)
     socket.once('connect', () => finish(true))
-    socket.once('timeout', () => finish(false))
-    socket.once('error', () => finish(false))
+    // Permission denial or a timeout does not prove the service is stopped.
+    // Keep the candidate staged unless the loopback explicitly refuses it.
+    socket.once('timeout', () => finish(true))
+    socket.once('error', (error) => finish(error.code !== 'ECONNREFUSED'))
   })
 }
 

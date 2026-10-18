@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronDown, Mic, Plus, Send, Trash2, Upload } from 'lucide-react'
+import { Mic, Plus, Trash2 } from 'lucide-react'
 import { Badge, Button, Card, Modal } from '../ui'
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition'
-import type { LearningCandidate, PublicTwin, Twin, TwinAsset, TwinSkill, TwinSkillImport } from './types'
+import type { LearningCandidate, PublicTwin, Twin, TwinAsset, TwinSkill, TwinSkillImport, TwinDraft, TwinBuildUpload } from './types'
 import { TwinAvatar, twinAvatarPresets } from './TwinAvatar'
+import { TwinSkillLibrary } from './TwinSkillLibrary'
+import { TwinDialogue, type TwinDialogueTarget } from './TwinDialogue'
+import { TwinBuilder } from './TwinBuilder'
+import { TwinInquiryInbox } from './TwinInquiryInbox'
+import { summarizeTwinFocus, resolveTwinDescription } from './twinTemplates'
+import type { TwinBuilderDraft } from './twinDraftRecovery'
 
-type TwinDraft = { id: string; name: string; role: string; rules: string; cases: string; avatarPreset?: string | null; avatarDataUrl?: string | null }
 type ImportableSource = { id: string; name: string; text: string; sourceType: string }
 type PlatformSkill = { id: string; name: string; description?: string; markdown?: string }
 const Field = ({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) => <label className={className}><span className="label">{label}</span>{children}</label>
 
 export function ExperienceAssetsWorkspace(props: {
+  preview?: boolean
   currentUserId: string
   twins: Twin[]
   publicTwins: PublicTwin[]
@@ -19,6 +25,15 @@ export function ExperienceAssetsWorkspace(props: {
   isNew: boolean
   dirty: boolean
   saving: boolean
+  draftId: string
+  builderDraft?: TwinBuilderDraft
+  builderEpoch?: number
+  onBuilderDraft?: (state: TwinBuilderDraft) => void
+  buildUpload?: TwinBuildUpload
+  onBuildUploadAdopted: () => void
+  onPendingChange?: (editor: string, pending: boolean) => void
+  projects: Array<{ id: string; name: string }>
+  onBuildUpload: (file: File) => Promise<string | null>
   assets: TwinAsset[]
   candidates: LearningCandidate[]
   skills: TwinSkill[]
@@ -28,49 +43,38 @@ export function ExperienceAssetsWorkspace(props: {
   onNew: () => void
   onSelect: (twin: Twin) => void
   onDraft: (draft: TwinDraft) => void
-  onSave: () => Promise<void>
+  onSave: () => Promise<unknown>
   onDelete: (twin: Twin) => Promise<void>
-  onPublish: (twin: Twin) => Promise<void>
+  onPublish: (twin: Twin, content: { publicRules: string; publicBoundaries: string }) => Promise<void>
   onWithdraw: (twin: Twin) => Promise<void>
   onImportLocal: (file: File) => Promise<void>
   onImportSource: (source: ImportableSource) => Promise<void>
   onParseAsset: (asset: TwinAsset) => Promise<string | null>
-  onScanLearning: (options?: { silent?: boolean }) => Promise<void>
+  onAssetDecision: (asset: TwinAsset, decision: '采纳' | '排除', traits?: string, target?: 'preference' | 'skill') => Promise<void>
+  onUpdateCandidate: (id: string, input: { topic: string; rules: string; boundaries: string; rationale: string }) => Promise<void>
+  onExcludeImport: (id: string) => Promise<void>
+  onRefreshLearning: () => Promise<void>
   onDecideCandidates: (ids: string[], decision: '确认' | '拒绝') => Promise<void>
   onImportSkillFiles: (files: FileList | File[]) => Promise<void>
   onImportGithubSkill: (url: string) => Promise<void>
   onImportPlatformSkill: (skill: PlatformSkill) => Promise<void>
   onLearnSkill: (id: string) => Promise<void>
   onToggleSkill: (skill: TwinSkill) => Promise<void>
-  onInvoke: (twin: PublicTwin, question: string) => Promise<{ advice: string } | null>
-  onConversationFeedback: (input: { userQuestion: string; assistantAnswer: string; feedback: '采纳' | '修改' | '拒绝'; feedbackNote: string }) => Promise<void>
 }) {
-  const [selectedCandidates, setSelectedCandidates] = useState<string[]>([])
-  const [sourceOpen, setSourceOpen] = useState(false)
   const [avatarOpen, setAvatarOpen] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [conversationTwin, setConversationTwin] = useState<PublicTwin | null>(null)
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState('')
-  const [asking, setAsking] = useState(false)
-  const [feedbackNote, setFeedbackNote] = useState('')
-  const [url, setUrl] = useState('')
+  const [conversationTwin, setConversationTwin] = useState<TwinDialogueTarget | null>(null)
+  const [publication, setPublication] = useState<{ twin: Twin; publicRules: string; publicBoundaries: string } | null>(null)
+  const [publishing, setPublishing] = useState(false)
+  const [building, setBuilding] = useState(false)
+  const [publishError, setPublishError] = useState('')
   const nameRef = useRef<HTMLInputElement | null>(null)
-  const automaticallyScannedTwins = useRef(new Set<string>())
-  const speech = useSpeechRecognition({ continuous: true, onFinal: text => props.onDraft({ ...props.draft, rules: `${props.draft.rules}${props.draft.rules ? '\n' : ''}${text}` }) })
+  const draftRef = useRef(props.draft); draftRef.current = props.draft
+  const speech = useSpeechRecognition({ continuous: true, onFinal: text => props.onDraft({ ...draftRef.current, rules: `${draftRef.current.rules}${draftRef.current.rules ? '\n' : ''}${text}` }) })
   useEffect(() => { if (props.isNew) nameRef.current?.focus() }, [props.isNew])
-  useEffect(() => {
-    const twinId = props.selectedTwin?.id
-    if (!twinId || automaticallyScannedTwins.current.has(twinId)) return
-    automaticallyScannedTwins.current.add(twinId)
-    void props.onScanLearning({ silent: true })
-  }, [props.selectedTwin?.id])
+  useEffect(() => { speech.reset() }, [props.selectedTwin?.id, props.isNew])
 
   const ownPublished = new Map(props.publicTwins.filter(item => item.ownerUserId === props.currentUserId).map(item => [item.twinId, item]))
   const otherPublished = props.publicTwins.filter(item => item.ownerUserId !== props.currentUserId)
-  const pendingImports = props.skillImports.filter(item => item.status === '待学习')
-  const pendingCandidates = props.candidates.filter(item => item.status === '待确认')
-  const processedImports = props.skillImports.filter(item => item.status !== '待学习')
 
   const readAvatar = (file: File) => {
     if (file.size > 2 * 1024 * 1024) { window.alert('头像不能超过 2MB'); return }
@@ -79,48 +83,33 @@ export function ExperienceAssetsWorkspace(props: {
     reader.readAsDataURL(file)
   }
 
-  return <div className="space-y-5">
+  return <fieldset disabled={props.saving} className="min-w-0 space-y-5">
+    {!props.preview && <TwinInquiryInbox key={props.currentUserId} onPendingChange={props.onPendingChange} />}
     <Card className="p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">我的数字分身</h2><p className="mt-1 text-xs text-slate-500">判断偏好和素材默认仅本人可见；公开时只发布当前确认内容。</p></div><Button onClick={props.onNew}><Plus className="h-4 w-4" />新增数字分身</Button></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">我的数字分身</h2><Button onClick={props.onNew}><Plus className="h-4 w-4" />新增数字分身</Button></div>
       <div className="mt-4 flex gap-3 overflow-x-auto pb-2">
-        {props.twins.map(twin => <button key={twin.id} className={`min-w-56 rounded-xl border p-4 text-left ${props.selectedTwin?.id === twin.id ? 'border-brand-400 bg-brand-50' : 'border-slate-200'}`} onClick={() => props.onSelect(twin)}><div className="flex items-center gap-2"><TwinAvatar id={twin.id} name={twin.name} kind={twin.avatarKind} preset={twin.avatarPreset} /><div className="min-w-0 flex-1"><strong className="block truncate">{twin.name}</strong><p className="mt-1 text-xs text-slate-500">私有版本 v{twin.activeVersion}</p></div><Badge>{ownPublished.has(twin.id) ? '已公开' : '未公开'}</Badge></div></button>)}
+        {props.twins.map(twin => <button key={twin.id} className={`min-w-64 max-w-80 rounded-xl border p-4 text-left ${props.selectedTwin?.id === twin.id ? 'border-brand-400 bg-brand-50' : 'border-slate-200'}`} onClick={() => props.onSelect(twin)}><div className="flex items-center gap-2"><TwinAvatar id={twin.id} name={twin.name} kind={twin.avatarKind} preset={twin.avatarPreset} /><div className="min-w-0 flex-1"><strong className="block truncate">{twin.name}</strong><p className="mt-1 text-xs text-slate-500">私有版本 v{twin.activeVersion}</p></div><Badge>{ownPublished.has(twin.id) ? '已公开' : '未公开'}</Badge></div><p className="mt-3 line-clamp-2 text-xs leading-relaxed text-slate-600">{resolveTwinDescription(twin) || '尚未填写说明'}</p></button>)}
         {!props.twins.length && !props.isNew && <p className="text-sm text-slate-400">尚未创建数字分身。</p>}
       </div>
       {(props.selectedTwin || props.isNew) && <div className="mt-5 rounded-xl border border-slate-200 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><strong>{props.isNew ? '未保存的新分身' : '编辑当前分身'}{props.dirty && <span className="ml-2 text-xs font-normal text-amber-700">有未保存修改</span>}</strong><div className="flex gap-2">{props.selectedTwin && (ownPublished.has(props.selectedTwin.id) ? <Button size="sm" variant="secondary" onClick={() => void props.onWithdraw(props.selectedTwin!)}>取消公开</Button> : <Button size="sm" variant="secondary" onClick={() => void props.onPublish(props.selectedTwin!)}>公开到分身库</Button>)}{props.selectedTwin && <Button size="sm" variant="secondary" onClick={() => void props.onDelete(props.selectedTwin!)}><Trash2 className="h-3.5 w-3.5" />删除</Button>}</div></div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><strong>{props.isNew ? '未保存的新分身' : '编辑当前分身'}{props.dirty && <span className="ml-2 text-xs font-normal text-amber-700">有未保存修改</span>}</strong><div className="flex flex-wrap gap-2">{props.selectedTwin && <><Button size="sm" variant="secondary" onClick={() => setConversationTwin({ id: props.selectedTwin!.id, twinId: props.selectedTwin!.id, name: props.selectedTwin!.name, public: false, avatarKind: props.selectedTwin!.avatarKind, avatarPreset: props.selectedTwin!.avatarPreset, learningTwinId: props.selectedTwin!.id })}>调用对话</Button><Button size="sm" variant="secondary" onClick={() => { const twin = props.selectedTwin!; const existing = ownPublished.get(twin.id); setPublishError(''); setPublication({ twin, publicRules: existing?.publicRules || twin.rules, publicBoundaries: existing?.publicBoundaries || '仅提供辅助建议，结论须依据项目证据核验。' }) }}>{ownPublished.has(props.selectedTwin.id) ? '更新公开内容' : '公开到分身库'}</Button>{ownPublished.has(props.selectedTwin.id) && <Button size="sm" variant="secondary" onClick={() => void props.onWithdraw(props.selectedTwin!)}>取消公开</Button>}<Button size="sm" variant="secondary" onClick={() => void props.onDelete(props.selectedTwin!)}><Trash2 className="h-3.5 w-3.5" />删除</Button></>}</div></div>
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="分身名称"><input ref={nameRef} className="input" value={props.draft.name} onChange={event => props.onDraft({ ...props.draft, name: event.target.value })} /></Field>
-          <button type="button" className="flex items-end gap-2 text-left" onClick={() => setAvatarOpen(true)}><TwinAvatar id={props.selectedTwin?.id || 'draft'} name={props.draft.name || '数字分身'} preset={props.draft.avatarPreset} kind={props.draft.avatarDataUrl ? 'upload' : props.selectedTwin?.avatarKind} size="lg" /><span className="pb-1 text-sm text-slate-500">点击头像可更换</span></button>
-          <div className="flex items-end gap-2"><Button variant="secondary" onClick={speech.state === 'listening' ? speech.pause : speech.start}><Mic className="h-4 w-4" />{speech.state === 'listening' ? '暂停语音' : '语音录入偏好'}</Button>{speech.error && <span className="text-xs text-amber-700">{speech.error}</span>}</div>
-          <Field label="判断偏好" className="md:col-span-2"><textarea className="textarea min-h-44" value={props.draft.rules} onChange={event => props.onDraft({ ...props.draft, rules: event.target.value })} /></Field>
-          <Field label="案例与适用边界" className="md:col-span-2"><textarea className="textarea min-h-28" value={props.draft.cases} onChange={event => props.onDraft({ ...props.draft, cases: event.target.value })} /></Field>
+          <button type="button" aria-label="更换数字分身头像" className="flex items-end gap-2 text-left" onClick={() => setAvatarOpen(true)}><TwinAvatar id={props.selectedTwin?.id || 'draft'} name={props.draft.name || '数字分身'} preset={props.draft.avatarPreset} kind={props.selectedTwin?.avatarKind} previewUrl={props.draft.avatarDataUrl} size="lg" /><span className="pb-1 text-sm text-slate-500">点击头像可更换</span></button>
+          <Field label="分身备注说明" className="md:col-span-2"><input className="input" value={resolveTwinDescription(props.draft)} placeholder="该分身关注…" onChange={event => props.onDraft({ ...props.draft, description: event.target.value, descriptionMode: 'manual' })} /><button type="button" className="mt-1 text-xs text-brand-700" onClick={() => props.onDraft({ ...props.draft, description: summarizeTwinFocus(props.draft.rules), descriptionMode: 'auto' })}>根据关注点自动概括</button></Field>
+          <div className="md:col-span-2"><TwinBuilder key={`${props.selectedTwin?.id || props.draftId}:${props.builderEpoch || 0}`} initialState={props.builderDraft} onDraftState={props.onBuilderDraft} draft={props.draft} draftId={props.draftId} onDraft={props.onDraft} onUpload={props.onBuildUpload} upload={props.buildUpload} preview={props.preview} onBusyChange={setBuilding} onUploadAdopted={props.onBuildUploadAdopted} onPendingChange={props.onPendingChange} /></div>
+          <details className="md:col-span-2"><summary className="cursor-pointer text-sm text-slate-600">查看与调整完整偏好</summary><div className="mt-3 space-y-3"><Field label="判断偏好"><textarea className="textarea min-h-44" value={props.draft.rules} onChange={event => props.onDraft({ ...props.draft, rules: event.target.value, ...(props.draft.descriptionMode !== 'manual' ? { description: summarizeTwinFocus(event.target.value) } : {}) })} /></Field><Button variant="secondary" onClick={speech.state === 'listening' ? speech.pause : speech.start}><Mic className="h-4 w-4" />{speech.state === 'listening' ? '暂停语音' : '语音补充偏好'}</Button>{speech.error && <span className="text-xs text-amber-700">{speech.error}</span>}<Field label="私有案例与适用边界（可选）"><textarea className="textarea min-h-28" value={props.draft.cases} onChange={event => props.onDraft({ ...props.draft, cases: event.target.value })} /></Field><p className="text-xs leading-relaxed text-slate-500">案例保留你的判断经验；适用边界说明何时不能套用这些经验。均可留空，不随公开分身分享。</p></div></details>
         </div>
-        <div className="mt-4 flex justify-end"><Button disabled={props.saving || !props.draft.name.trim()} onClick={() => void props.onSave()}>{props.saving ? '保存中…' : props.isNew ? '创建分身' : '保存新版本'}</Button></div>
+        <div className="mt-4 flex justify-end"><Button disabled={building || props.saving || !props.draft.name.trim()} onClick={() => void props.onSave()}>{building ? '请等待建议整理完成' : props.saving ? '保存中…' : props.isNew ? '创建分身' : '保存新版本'}</Button></div>
       </div>}
     </Card>
 
-    <Card className="p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">沉淀的 Skill 库</h2>{props.selectedTwin && <div className="flex flex-wrap gap-2"><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm"><Upload className="mr-1 h-4 w-4" />导入素材<input className="hidden" type="file" accept=".txt,.md,.pdf,.doc,.docx,.mp3,.m4a,.wav,.webm" onChange={event => { const file = event.target.files?.[0]; if (file) void props.onImportLocal(file); event.currentTarget.value = '' }} /></label><label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm">导入本机 Skill<input className="hidden" type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} accept=".md,.txt,.json,.yaml,.yml" onChange={event => { if (event.target.files?.length) void props.onImportSkillFiles(event.target.files); event.currentTarget.value = '' }} /></label><Button variant="secondary" onClick={() => setSourceOpen(true)}>知识库导入</Button></div>}</div>
-      {!props.selectedTwin ? <p className="mt-4 text-sm text-slate-400">请先选择一个数字分身。</p> : <>
-        <div className="mt-4 grid gap-3 lg:grid-cols-2"><div className="rounded-lg border p-3"><strong className="text-sm">从网址链接导入</strong><div className="mt-2 flex gap-2"><input className="input" value={url} onChange={event => setUrl(event.target.value)} placeholder="粘贴公开 Skill 说明文件链接" /><Button size="sm" disabled={!url.trim()} onClick={() => void props.onImportGithubSkill(url).then(() => setUrl(''))}>导入</Button></div></div><div className="rounded-lg border p-3"><strong className="text-sm">平台 Skill 库</strong><div className="mt-2 max-h-24 space-y-1 overflow-auto">{props.platformSkills.map(skill => <button key={skill.id} className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-50" onClick={() => void props.onImportPlatformSkill(skill)}>导入 · {skill.name}</button>)}{!props.platformSkills.length && <p className="text-xs text-slate-400">暂无可导入的平台 Skill。</p>}</div></div></div>
-        <div className="mt-5 grid gap-5 lg:grid-cols-2">
-          <section><h3 className="text-sm font-medium">我的 Skills</h3><div className="mt-2 space-y-2">{props.skills.map(skill => <div key={skill.id} className="rounded-lg border p-3 text-sm"><div className="flex items-center justify-between gap-2"><strong>{skill.name}</strong><Badge>{skill.status}</Badge></div><p className="mt-1 text-xs text-slate-500">{skill.versions[0]?.trigger || '未填写触发场景'} · v{skill.activeVersion}</p><div className="mt-2 flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={() => void props.onToggleSkill(skill)}>{skill.status === '已生效' ? '停用' : '启用'}</Button><a className="inline-flex items-center rounded-lg border px-2 py-1 text-xs" href={`/api/due-diligence/twins/${props.selectedTwin!.id}/skills/${skill.id}/download`}>下载 SKILL.md</a></div></div>)}{!props.skills.length && <p className="text-sm text-slate-400">暂无已沉淀 Skill。</p>}</div></section>
-          <section><h3 className="text-sm font-medium">待沉淀</h3><div className="mt-2 space-y-2">
-            {props.assets.map(asset => <div key={`asset-${asset.id}`} className="rounded-lg border p-3 text-sm"><div className="flex items-center justify-between gap-2"><span><strong>{asset.sourceName}</strong><small className="mt-1 block text-slate-500">{asset.sourceType} · {asset.parseStatus}</small></span><Button size="sm" variant="secondary" disabled={asset.parseStatus === '解析中'} onClick={async () => { const suggestion = await props.onParseAsset(asset); if (suggestion) props.onDraft({ ...props.draft, rules: `${props.draft.rules}${props.draft.rules ? '\n\n' : ''}${suggestion}` }) }}>解析</Button></div></div>)}
-            {pendingImports.map(item => <div key={`import-${item.id}`} className="rounded-lg border p-3 text-sm"><strong>{item.parsed.name || item.sourceName}</strong><p className="mt-1 text-xs text-slate-500">{item.sourceType} · {item.parsed.trigger || '待解析'}</p><Button className="mt-2" size="sm" onClick={() => void props.onLearnSkill(item.id)}>沉淀为 Skill</Button></div>)}
-            {pendingCandidates.map(item => <label key={`candidate-${item.id}`} className="flex gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" checked={selectedCandidates.includes(item.id)} onChange={() => setSelectedCandidates(ids => ids.includes(item.id) ? ids.filter(id => id !== item.id) : [...ids, item.id])} /><span><strong>{item.topic} Skill</strong><small className="mt-1 block text-slate-500">自动提炼 · 置信度 {item.confidence}%</small></span></label>)}
-            {!props.assets.length && !pendingImports.length && !pendingCandidates.length && <p className="text-sm text-slate-400">暂无待沉淀内容。</p>}
-            {pendingCandidates.length > 0 && <div className="flex gap-2"><Button size="sm" variant="secondary" disabled={!selectedCandidates.length} onClick={() => void props.onDecideCandidates(selectedCandidates, '拒绝').then(() => setSelectedCandidates([]))}>排除</Button><Button size="sm" disabled={!selectedCandidates.length} onClick={() => void props.onDecideCandidates(selectedCandidates, '确认').then(() => setSelectedCandidates([]))}>沉淀</Button></div>}
-          </div></section>
-        </div>
-        {processedImports.length > 0 && <div className="mt-4 border-t pt-3"><button className="flex items-center gap-1 text-xs text-slate-500" onClick={() => setHistoryOpen(value => !value)}>查看处理记录 <ChevronDown className={`h-3.5 w-3.5 transition ${historyOpen ? 'rotate-180' : ''}`} /></button>{historyOpen && <div className="mt-2 space-y-1">{processedImports.map(item => <p key={item.id} className="text-xs text-slate-500">{item.sourceName} · {item.status}{item.errorMessage ? ` · ${item.errorMessage}` : ''}</p>)}</div>}</div>}
-      </>}
-    </Card>
+    <TwinSkillLibrary key={props.selectedTwin?.id || "new"} {...props} />
 
-    <Card className="p-5"><h2 className="font-semibold">公司分身库</h2><div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{otherPublished.map(twin => <div key={twin.id} className="rounded-xl border p-4"><div className="flex items-center gap-2"><TwinAvatar id={twin.twinId} name={twin.ownerName} kind={twin.avatarKind} preset={twin.avatarPreset} /><strong>{twin.ownerName} · {twin.twinName || '数字分身'}</strong><Badge>v{twin.publishedVersion}</Badge></div><p className="mt-2 text-sm text-slate-600">{twin.introduction}</p><Button className="mt-3" size="sm" onClick={() => { setConversationTwin(twin); setQuestion(''); setAnswer('') }}>调用对话</Button></div>)}{!otherPublished.length && <p className="text-sm text-slate-400">暂无其他员工公开分身。</p>}</div></Card>
+    <Card className="p-5"><h2 className="font-semibold">公司分身库</h2><div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{otherPublished.map(twin => <div key={twin.id} className="rounded-xl border p-4"><div className="flex items-center gap-2"><TwinAvatar id={twin.twinId} name={twin.ownerName} kind={twin.avatarKind} preset={twin.avatarPreset} /><strong>{twin.ownerName} · {twin.twinName || '数字分身'}</strong><Badge>v{twin.publishedVersion}</Badge></div><p className="mt-2 text-sm text-slate-600">{twin.introduction}</p><Button className="mt-3" size="sm" onClick={() => { setConversationTwin({ id: twin.id, twinId: twin.twinId, name: `${twin.ownerName} · ${twin.twinName || '数字分身'}`, public: true, avatarKind: twin.avatarKind, avatarPreset: twin.avatarPreset, learningTwinId: props.selectedTwin?.id }) }}>调用对话</Button></div>)}{!otherPublished.length && <p className="text-sm text-slate-400">暂无其他员工公开分身。</p>}</div></Card>
 
     <Modal open={avatarOpen} title="更换分身头像" onClose={() => setAvatarOpen(false)} footer={<Button variant="secondary" onClick={() => setAvatarOpen(false)}>完成</Button>}><div className="flex flex-wrap gap-3">{twinAvatarPresets.map(preset => <button type="button" key={preset} onClick={() => props.onDraft({ ...props.draft, avatarPreset: preset, avatarDataUrl: null })} className={`rounded-lg p-2 ${props.draft.avatarPreset === preset && !props.draft.avatarDataUrl ? 'ring-2 ring-brand-500' : ''}`}><TwinAvatar id="draft" name="头像" preset={preset} size="lg" /></button>)}<label className="inline-flex cursor-pointer items-center rounded-lg border px-3 py-2 text-sm">上传图片<input className="hidden" type="file" accept="image/png,image/jpeg,image/webp" onChange={event => { const file = event.target.files?.[0]; if (file) readAvatar(file); event.currentTarget.value = '' }} /></label></div></Modal>
-    <Modal open={sourceOpen} title="从知识库导入" onClose={() => setSourceOpen(false)} footer={<Button variant="secondary" onClick={() => setSourceOpen(false)}>关闭</Button>}><div className="max-h-96 space-y-2 overflow-auto">{props.sources.map(source => <button key={`${source.sourceType}-${source.id}`} className="w-full rounded-lg border p-3 text-left hover:bg-slate-50" onClick={async () => { await props.onImportSource(source); setSourceOpen(false) }}><strong className="text-sm">{source.name}</strong><p className="mt-1 text-xs text-slate-500">{source.sourceType}</p></button>)}{!props.sources.length && <p className="text-sm text-slate-400">没有可导入的已解析材料或个人笔记。</p>}</div></Modal>
-    <Modal open={Boolean(conversationTwin)} title={conversationTwin ? `与 ${conversationTwin.ownerName}分身对话` : '公司分身对话'} onClose={() => setConversationTwin(null)} footer={<Button variant="secondary" onClick={() => setConversationTwin(null)}>关闭</Button>}><div className="space-y-3">{answer && <div className="rounded-lg bg-slate-50 p-4 text-sm whitespace-pre-wrap">{answer}</div>}<div className="flex gap-2"><textarea className="textarea min-h-24" value={question} onChange={event => setQuestion(event.target.value)} placeholder="输入希望该专家分身关注的问题…" /><Button disabled={asking || !question.trim()} onClick={async () => { if (!conversationTwin) return; setAsking(true); try { const result = await props.onInvoke(conversationTwin, question); setAnswer(result?.advice || '') } finally { setAsking(false) } }}><Send className="h-4 w-4" />{asking ? '回答中…' : '发送'}</Button></div>{answer && props.selectedTwin && <div className="rounded-lg border p-3"><p className="text-xs text-slate-500">这次回答是否体现了你希望沉淀的判断方式？</p><input className="input mt-2" value={feedbackNote} onChange={event => setFeedbackNote(event.target.value)} placeholder="如有修改，可补充你的正确判断" /><div className="mt-2 flex gap-2">{(['采纳', '修改', '拒绝'] as const).map(value => <Button key={value} size="sm" variant={value === '采纳' ? 'default' : 'secondary'} onClick={() => void props.onConversationFeedback({ userQuestion: question, assistantAnswer: answer, feedback: value, feedbackNote })}>{value}</Button>)}</div></div>}</div></Modal>
-  </div>
+    <Modal open={Boolean(publication)} title="确认公开内容" onClose={() => setPublication(null)} footer={<Button disabled={publishing || !publication?.publicRules.trim()} onClick={async () => { if (!publication) return; setPublishing(true); setPublishError(''); try { await props.onPublish(publication.twin, publication); setPublication(null) } catch (err) { setPublishError((err as Error).message) } finally { setPublishing(false) } }}>{publishing ? '发布中…' : '确认发布'}</Button>}>{publication && <div className="space-y-3"><p className="text-sm text-slate-600">同事将使用以下公开内容。私有案例、素材和 Skill 保留在本人分身中。</p><Field label="公开判断偏好"><textarea className="textarea min-h-40" value={publication.publicRules} onChange={event => setPublication({ ...publication, publicRules: event.target.value })} /></Field><Field label="公开适用边界"><textarea className="textarea" value={publication.publicBoundaries} onChange={event => setPublication({ ...publication, publicBoundaries: event.target.value })} /></Field>{publishError && <p role="alert" className="text-sm text-red-700">{publishError}</p>}</div>}</Modal>
+    {conversationTwin && <TwinDialogue key={`${conversationTwin.public}:${conversationTwin.id}`} target={conversationTwin} projects={props.projects} onClose={() => setConversationTwin(null)} onLearned={props.onRefreshLearning} />}
+  </fieldset>
 }

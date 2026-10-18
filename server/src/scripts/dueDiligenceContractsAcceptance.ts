@@ -14,16 +14,18 @@ try {
   if (originalOrigins === undefined) delete process.env.AUTH_ALLOWED_ORIGINS; else process.env.AUTH_ALLOWED_ORIGINS = originalOrigins
 }
 
-const [page, workspace, interviews, routes] = await Promise.all([
+const [page, workspace, interviews, routes, skillLibrary] = await Promise.all([
   readFile(new URL('../../../src/pages/DueDiligencePage.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../../../src/components/dueDiligence/ExperienceAssetsWorkspace.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../../../src/components/dueDiligence/InterviewsWorkspace.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../routes/dueDiligence.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../../../src/components/dueDiligence/TwinSkillLibrary.tsx', import.meta.url), 'utf8'),
 ])
 assert.match(page, /\/capabilities\/write-probe/)
 assert.match(page, /\/skill-library/)
-assert.match(workspace, /沉淀的 Skill 库/)
-assert.match(workspace, /从网址链接导入/)
+assert.match(workspace, /TwinSkillLibrary/)
+assert.match(skillLibrary, /沉淀的 Skill 库/)
+assert.match(skillLibrary, /从网址链接导入/)
 assert.doesNotMatch(workspace, /待确认经验/)
 assert.match(interviews, /放弃本次/)
 assert.match(interviews, /放弃本次语音/)

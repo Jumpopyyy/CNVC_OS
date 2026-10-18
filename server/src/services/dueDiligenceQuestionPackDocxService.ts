@@ -1,4 +1,5 @@
 import { AlignmentType, BorderStyle, Document, Packer, Paragraph, ShadingType, Table, TableCell, TableLayoutType, TableRow, TextRun, VerticalAlign, WidthType } from 'docx'
+import { dueDiligenceCategory } from '../contracts/digitalTwinTemplates.js'
 
 export type DueDiligenceQuestionDocumentInput = {
   title: string
@@ -14,7 +15,8 @@ export type DueDiligenceQuestionDocumentInput = {
 }
 
 export async function buildDueDiligenceQuestionPackDocx(input: DueDiligenceQuestionDocumentInput) {
-  const widths = [620, 3250, 1050, 850, 4430]
+  // Match the usable A4 width; broad category names fit on one readable line.
+  const widths = [720, 3600, 1300, 850, 3996]
   const documentFont = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Songti SC', cs: 'Arial' }
   const cellBorders = {
     top: { style: BorderStyle.SINGLE, size: 4, color: 'D9D9D9' },
@@ -26,11 +28,12 @@ export async function buildDueDiligenceQuestionPackDocx(input: DueDiligenceQuest
     width: { size: widths[column], type: WidthType.DXA },
     shading: { type: ShadingType.CLEAR, fill: header ? '245E5A' : rowIndex % 2 === 0 ? 'F3F7F6' : 'FFFFFF' },
     margins: { top: 70, bottom: 70, left: 120, right: 120 },
-    verticalAlign: column === 1 || column === 4 ? VerticalAlign.TOP : VerticalAlign.CENTER,
+    verticalAlign: VerticalAlign.CENTER,
     borders: cellBorders,
     children,
   })
-  const bodyParagraph = (text: string, bold = false) => new Paragraph({
+  const bodyParagraph = (text: string, bold = false, alignment: typeof AlignmentType[keyof typeof AlignmentType] = AlignmentType.LEFT) => new Paragraph({
+    alignment,
     spacing: { before: 0, after: 40, line: 250 },
     children: [new TextRun({ text, font: documentFont, size: 20, bold, color: '263B3A' })],
   })
@@ -44,10 +47,10 @@ export async function buildDueDiligenceQuestionPackDocx(input: DueDiligenceQuest
     if (question.evidenceRequirement?.trim()) detail.push(bodyParagraph(`所需证据：${question.evidenceRequirement.trim()}`))
     if (!detail.length) detail.push(bodyParagraph('—'))
     const columns = [
-      [bodyParagraph(String(index + 1))],
+      [bodyParagraph(String(index + 1), false, AlignmentType.CENTER)],
       [bodyParagraph(question.title, true)],
-      [bodyParagraph(question.category)],
-      [bodyParagraph(question.priority, true)],
+      [bodyParagraph(dueDiligenceCategory(question.category), false, AlignmentType.CENTER)],
+      [bodyParagraph(question.priority, true, AlignmentType.CENTER)],
       detail,
     ]
     return new TableRow({ cantSplit: true, children: columns.map((children, column) => makeCell(children, column, index + 1)) })
@@ -56,7 +59,7 @@ export async function buildDueDiligenceQuestionPackDocx(input: DueDiligenceQuest
   const doc = new Document({ sections: [{ properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 760, right: 720, bottom: 760, left: 720 } } }, children: [
     new Paragraph({ style: 'Title', alignment: AlignmentType.CENTER, spacing: { before: 0, after: 140 }, children: [new TextRun({ text: input.title, bold: true, size: 32, font: { ...documentFont, eastAsia: 'STHeiti' }, color: '000000' })] }),
     new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 260 }, children: [new TextRun({ text: `${input.projectName}  ·  ${generatedAt.toLocaleDateString('zh-CN')}`, size: 20, font: documentFont, color: '637573' })] }),
-    new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, columnWidths: widths, layout: TableLayoutType.FIXED, margins: { top: 120, bottom: 120, left: 120, right: 120 }, rows }),
+    new Table({ width: { size: widths.reduce((sum, width) => sum + width, 0), type: WidthType.DXA }, columnWidths: widths, layout: TableLayoutType.FIXED, margins: { top: 120, bottom: 120, left: 120, right: 120 }, rows }),
   ] }] })
   return Packer.toBuffer(doc)
 }

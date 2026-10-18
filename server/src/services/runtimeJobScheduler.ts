@@ -230,6 +230,11 @@ export function runtimeJobDefinitions(): RuntimeJobDefinition[] {
   const kr36AdmissionMinute = Math.min(59, readIntegerEnv('KR36_PROJECT_ADMISSION_MINUTE', 10, 0))
   return [
     {
+      id: 'due-diligence-artifact-worker', task: 'due-diligence-artifact-worker', enabled: true,
+      scheduleKind: 'interval', intervalSeconds: 5, initialDelayMs: 15_000, timeoutMs: 180_000,
+      run: async signal => (await import('./dueDiligenceInterviewWorkflowService.js')).runDueDiligenceArtifactWork(signal),
+    },
+    {
       id: 'im-outbox-dispatch',
       task: 'im-outbox-dispatch',
       enabled: resolveExtensionFeatureFlags().imIntegrationsEnabled && enabledEnv('IM_OUTBOX_ENABLED'),

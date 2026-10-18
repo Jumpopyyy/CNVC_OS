@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { requestAiGatewayCompletion } from './aiGatewayService.js'
 import type { resolveDueDiligenceModelRuntime } from './aiDueDiligenceSkillRuntimeService.js'
 
-const ParsedSkillSchema = z.object({
+export const ParsedSkillSchema = z.object({
   name: z.string().trim().min(1).max(128),
   trigger: z.string().trim().min(1).max(1000),
   instructions: z.string().trim().min(1).max(30000),

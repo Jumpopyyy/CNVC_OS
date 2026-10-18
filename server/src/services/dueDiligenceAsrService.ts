@@ -42,11 +42,12 @@ export async function transcribeDueDiligenceRecording(input: {
   fileName: string
   mimeType: string
   env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
 }) {
   const metadata = await inspectProjectFile(input.storagePath)
   assertAudioSize(metadata.size, input.env ?? process.env)
   const buffer = await readProjectFileBuffer(input.storagePath)
-  return transcribeDueDiligenceBuffer({ buffer, fileName: input.fileName, mimeType: input.mimeType, env: input.env })
+  return transcribeDueDiligenceBuffer({ buffer, fileName: input.fileName, mimeType: input.mimeType, env: input.env, signal: input.signal })
 }
 
 export async function transcribeDueDiligenceBuffer(input: {
@@ -55,6 +56,7 @@ export async function transcribeDueDiligenceBuffer(input: {
   mimeType: string
   env?: NodeJS.ProcessEnv
   fetchImpl?: typeof fetch
+  signal?: AbortSignal
 }) {
   const env = input.env ?? process.env
   const capability = getDueDiligenceAsrCapability(env)
@@ -77,7 +79,7 @@ export async function transcribeDueDiligenceBuffer(input: {
       headers: { Authorization: `Bearer ${env.ASR_API_KEY!.trim()}` },
       body: form,
       redirect: 'error',
-      signal: AbortSignal.timeout(Math.min(600_000, Math.max(30_000, Number(env.ASR_TIMEOUT_MS) || 180_000))),
+      signal: AbortSignal.any([...(input.signal ? [input.signal] : []), AbortSignal.timeout(Math.min(600_000, Math.max(30_000, Number(env.ASR_TIMEOUT_MS) || 180_000)))]),
     })
   } catch (error) {
     const timeout = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)

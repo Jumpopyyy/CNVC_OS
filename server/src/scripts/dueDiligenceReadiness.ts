@@ -1,5 +1,5 @@
 import { db, pool } from '../db/client.js'
-import { digitalTwinPrivateAssets, digitalTwinSkillImports, digitalTwins, dueDiligenceTranscriptionJobs } from '../db/schema.js'
+import { checkDueDiligenceSchema } from '../services/dueDiligenceSchemaReadinessService.js'
 import { resolveAiModelRoute } from '../services/aiModelSettingsService.js'
 import { getDueDiligenceAsrCapability } from '../services/dueDiligenceAsrService.js'
 
@@ -13,13 +13,8 @@ try {
   const productionOriginReady = process.env.NODE_ENV !== 'production' || origins.includes('https://cybernaut.newmin.cn')
   required('production-origin', productionOriginReady, process.env.NODE_ENV !== 'production' ? '非生产环境，不校验生产域名' : productionOriginReady ? '生产域名已加入可信来源' : '需设置 AUTH_ALLOWED_ORIGINS=https://cybernaut.newmin.cn')
 
-  const schemaChecks = await Promise.all([
-    db.select({ id: dueDiligenceTranscriptionJobs.id }).from(dueDiligenceTranscriptionJobs).limit(1),
-    db.select({ avatarKind: digitalTwins.avatarKind }).from(digitalTwins).limit(1),
-    db.select({ id: digitalTwinPrivateAssets.id }).from(digitalTwinPrivateAssets).limit(1),
-    db.select({ id: digitalTwinSkillImports.id }).from(digitalTwinSkillImports).limit(1),
-  ].map(promise => promise.then(() => true).catch(() => false)))
-  required('database-schema-0134', schemaChecks.every(Boolean), schemaChecks.every(Boolean) ? '尽调转写、头像和 Skill 数据表已就绪' : '请先执行数据库迁移至 0134')
+  const schemaChecks = await checkDueDiligenceSchema()
+  required('database-schema-0139', schemaChecks.every(Boolean), schemaChecks.every(Boolean) ? '长录音、清单与分身构建和问询数据表已就绪' : '请先执行数据库迁移至 0139')
 
   const [documentModel, interactiveModel] = await Promise.all([
     resolveAiModelRoute('ai-document').catch(() => null),

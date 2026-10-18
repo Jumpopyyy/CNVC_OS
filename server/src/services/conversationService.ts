@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { assertNewJwConversationAllowed } from '../config/jwConversationRolloutPolicy.js'
 import { agentConversationRepository } from '../repositories/index.js'
-import { getAccessibleProject, requireAiAssistantProject } from './projectAccessService.js'
+import { getAccessibleProject, requireAiAssistantProject, requireAccessibleProject } from './projectAccessService.js'
 import { listAvailableModels } from './aiModelSettingsService.js'
 import { removeAgentConversationWorkspace } from './agentWorkspaceLifecycleService.js'
 
@@ -83,6 +83,15 @@ export async function createConversation(userId: string, input: {
     externalSessionId,
     modelId: input.modelId || null,
   })
+}
+
+/** Business-record dialogue uses the existing project read boundary, including authorized leaders.
+ * It does not start the agent's tools or grant the broader AI-assistant workspace capability. */
+export async function createProjectRecordConversation(userId: string, projectId: string, title: string) {
+  assertNewJwConversationAllowed('project')
+  const project = await requireAccessibleProject(userId, projectId)
+  const id = randomUUID()
+  return agentConversationRepository.createConversationPair({ id, userId, title, scope: 'project', projectId, projectName: project.name, externalSessionId: `conv-${randomUUID()}`, modelId: null })
 }
 
 // 会话与消息均已落入 MySQL；这里同步更新新旧会话索引的标题。
