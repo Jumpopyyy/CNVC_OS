@@ -1,5 +1,5 @@
 import { db, pool } from '../db/client.js'
-import { checkDueDiligenceSchema } from '../services/dueDiligenceSchemaReadinessService.js'
+import { checkDueDiligenceSchema, DUE_DILIGENCE_SCHEMA_VERSION } from '../services/dueDiligenceSchemaReadinessService.js'
 import { resolveAiModelRoute } from '../services/aiModelSettingsService.js'
 import { getDueDiligenceAsrCapability } from '../services/dueDiligenceAsrService.js'
 
@@ -14,7 +14,7 @@ try {
   required('production-origin', productionOriginReady, process.env.NODE_ENV !== 'production' ? '非生产环境，不校验生产域名' : productionOriginReady ? '生产域名已加入可信来源' : '需设置 AUTH_ALLOWED_ORIGINS=https://cybernaut.newmin.cn')
 
   const schemaChecks = await checkDueDiligenceSchema()
-  required('database-schema-0139', schemaChecks.every(Boolean), schemaChecks.every(Boolean) ? '长录音、清单与分身构建和问询数据表已就绪' : '请先执行数据库迁移至 0139')
+  required(`database-schema-${DUE_DILIGENCE_SCHEMA_VERSION}`, schemaChecks.every(Boolean), schemaChecks.every(Boolean) ? '长录音、清单、分身及平台能力绑定数据已就绪' : `请先执行数据库迁移至 ${DUE_DILIGENCE_SCHEMA_VERSION}`)
 
   const [documentModel, interactiveModel] = await Promise.all([
     resolveAiModelRoute('ai-document').catch(() => null),
