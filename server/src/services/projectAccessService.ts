@@ -1,6 +1,6 @@
-import { and, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm'
+import { and, eq, inArray, ne, not, or, sql, type SQL } from 'drizzle-orm'
 import { db } from '../db/client.js'
-import { permissions, projectDutyAssignments, projectMembers, projects, rolePermissions, roles, userDepartments, userRoles, users } from '../db/schema.js'
+import { permissions, projectDutyAssignments, projectManagementAccessGrants, projectManagementAccessPolicies, projectMembers, projects, rolePermissions, roles, userDepartments, userRoles, users } from '../db/schema.js'
 import { identityRepositories } from '../repositories/index.js'
 
 export async function getAccessibleProject(userId: string, projectId: string) {
@@ -21,6 +21,34 @@ export async function requireAccessibleProject(userId: string, projectId: string
     throw Object.assign(new Error('无权访问该项目'), { status: 403, code: 'PROJECT_FORBIDDEN' })
   }
   return project
+}
+
+export async function requireEditableProject(userId: string, projectId: string) {
+  const project = await requireAccessibleProject(userId, projectId)
+  if (!await canEditProject(userId, projectId)) {
+    const actor = await identityRepositories.users.findById(userId)
+    await identityRepositories.audits.append({ userId, userName: actor!.name, module: '项目授权', action: '拒绝编辑', target: projectId })
+    throw Object.assign(new Error('无权编辑该项目'), { status: 403, code: 'PROJECT_EDIT_FORBIDDEN' })
+  }
+  return project
+}
+
+export async function canEditProject(userId: string, projectId: string) {
+  const actor = await identityRepositories.users.findById(userId)
+  if (!actor || actor.status !== '启用') return false
+  const [editable] = await db.select({ id: projects.id }).from(projects)
+    .where(and(eq(projects.id, projectId), projectEditCondition({ uid: userId, name: actor.name, role: actor.role }))).limit(1)
+  return Boolean(editable)
+}
+
+export async function requireProjectCreationAccess(userId: string) {
+  const actor = await identityRepositories.users.findById(userId)
+  if (!actor || actor.status !== '启用') throw Object.assign(new Error('账号不可用'), { status: 403, code: 'ACCOUNT_DISABLED' })
+  const [policy] = await db.select({ mode: projectManagementAccessPolicies.mode, editScope: projectManagementAccessPolicies.editScope })
+    .from(projectManagementAccessPolicies).where(eq(projectManagementAccessPolicies.userId, userId)).limit(1)
+  if (policy?.mode === 'custom' && policy.editScope === 'none') {
+    throw Object.assign(new Error('无权创建项目'), { status: 403, code: 'PROJECT_CREATE_FORBIDDEN' })
+  }
 }
 
 export async function requireAiAssistantProject(userId: string, projectId: string) {
@@ -54,7 +82,25 @@ export function isSystemAdmin(actor: Pick<ProjectAccessActor, 'role'>): boolean 
 
 // 供会议、待办、风险、摘要等项目从表复用同一 SQL 访问边界。
 // SQL identifiers are internal correlated actors; request identities remain strings.
-export function projectAccessCondition(actor: Omit<ProjectAccessActor, 'uid'> & { uid: string | SQL }) {
+function configuredProjectCondition(uid: string | SQL, capability: 'read' | 'edit') {
+  const own = or(
+    eq(projects.createdBy, uid),
+    eq(projects.ownerUserId, uid),
+    inArray(projects.id, db.select({ id: projectMembers.projectId }).from(projectMembers).where(eq(projectMembers.userId, uid))),
+  )!
+  const scopeColumn = capability === 'read' ? sql.raw('pa.read_scope') : sql.raw('pa.edit_scope')
+  const grantColumn = capability === 'read' ? sql.raw('pg.can_view') : sql.raw('pg.can_edit')
+  const scope = sql<boolean>`EXISTS (SELECT 1 FROM ${projectManagementAccessPolicies} pa
+    WHERE pa.user_id=${uid} AND (${scopeColumn}='all' OR (${scopeColumn}='own' AND ${own})))`
+  const grant = sql<boolean>`EXISTS (SELECT 1 FROM ${projectManagementAccessGrants} pg
+    WHERE pg.user_id=${uid} AND pg.project_id=${projects.id} AND ${grantColumn}=1)`
+  return and(
+    sql<boolean>`EXISTS (SELECT 1 FROM ${users} active_actor WHERE active_actor.id=${uid} AND active_actor.status='启用')`,
+    or(scope, grant),
+  )!
+}
+
+function projectPermissionCondition(actor: Omit<ProjectAccessActor, 'uid'> & { uid: string | SQL }, capability: 'read' | 'edit') {
   const membership = inArray(projects.id, db.select({ id: projectMembers.projectId }).from(projectMembers).where(eq(projectMembers.userId, actor.uid)))
   const legacyAccess = isSystemAdmin(actor) ? sql<boolean>`TRUE` : or(
     eq(projects.createdBy, actor.uid),
@@ -83,5 +129,18 @@ export function projectAccessCondition(actor: Omit<ProjectAccessActor, 'uid'> & 
       inArray(projects.id, db.select({ id: projectDutyAssignments.projectId }).from(projectDutyAssignments).where(and(eq(projectDutyAssignments.userId, actor.uid), ne(projectDutyAssignments.duty, 'coordinator')))),
     ),
   )
-  return or(and(ne(projects.workflowModel, 'fde-v1'), legacy), and(eq(projects.workflowModel, 'fde-v1'), fde))!
+  const baseline = or(and(ne(projects.workflowModel, 'fde-v1'), legacy), and(eq(projects.workflowModel, 'fde-v1'), fde))!
+  const configured = sql<boolean>`EXISTS (SELECT 1 FROM ${projectManagementAccessPolicies} pa WHERE pa.user_id=${actor.uid} AND pa.mode='custom')`
+  return and(
+    ne(projects.lifecycle, 'deleted'),
+    or(and(not(configured), baseline), and(configured, configuredProjectCondition(actor.uid, capability))),
+  )!
+}
+
+export function projectAccessCondition(actor: Omit<ProjectAccessActor, 'uid'> & { uid: string | SQL }) {
+  return projectPermissionCondition(actor, 'read')
+}
+
+export function projectEditCondition(actor: Omit<ProjectAccessActor, 'uid'> & { uid: string | SQL }) {
+  return projectPermissionCondition(actor, 'edit')
 }

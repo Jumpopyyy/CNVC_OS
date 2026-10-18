@@ -12,7 +12,7 @@ import {
   resetManagedUserPassword,
   updateManagedUser,
 } from '../services/identityAdministrationService.js'
-import { requireAccessibleProject } from '../services/projectAccessService.js'
+import { requireAccessibleProject, requireEditableProject, requireProjectCreationAccess } from '../services/projectAccessService.js'
 import {
   convertLead,
   deferProjectDiscoveryLead,
@@ -34,6 +34,7 @@ import {
   type LeadScoreJob,
 } from '../services/aiSummaryService.js'
 import { commitManualLead } from '../services/leadIntakeService.js'
+import { projectPreddRouter } from './projectPredd.js'
 import { writeAudit } from '../services/auditService.js'
 import {
   enqueueLeadScoreJob,
@@ -384,6 +385,8 @@ metaRouter.get('/project-discovery/assignment-options', async (req: AuthedReques
     res.json(await listProjectDiscoveryAssignmentOptions(req.user!.uid))
   } catch (err) { next(err) }
 })
+
+metaRouter.use(projectPreddRouter)
 
 metaRouter.patch('/project-discovery/leads/:id/keywords', async (req: AuthedRequest, res, next) => {
   try {
@@ -2080,6 +2083,7 @@ metaRouter.get('/leads/:id/score', (_req, res) => {
 
 metaRouter.post('/leads/:id/convert', async (req: AuthedRequest, res, next) => {
   try {
+    await requireProjectCreationAccess(req.user!.uid)
     const leadId = String(req.params.id)
     const assignment = z.object({
       ownerUserId: z.string().trim().min(1).max(64).optional(),
@@ -2107,7 +2111,7 @@ metaRouter.post('/ai-summaries', async (req: AuthedRequest, res, next) => {
       confidence: z.coerce.number().int().min(0).max(100).optional(),
       sources: z.array(z.string()).optional(),
     }).parse(req.body)
-    await requireAccessibleProject(req.user!.uid, body.projectId)
+    await requireEditableProject(req.user!.uid, body.projectId)
     res.json(await upsertSummary(body.projectId, body, req.user!.uid))
   } catch (err) { next(err) }
 })

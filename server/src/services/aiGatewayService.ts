@@ -44,10 +44,17 @@ export function aiGatewayResponseText(payload: unknown): string {
   }).join('').trim()
 }
 
+function temperatureParameter(value?: number) {
+  if (value === undefined) return {}
+  if (!Number.isFinite(value) || value < 0 || value > 2) throw new Error('temperature must be between 0 and 2')
+  return { temperature: value }
+}
+
 export function buildAiResponsesBody(input: {
   model: string
   messages: AiGatewayMessage[]
   maxTokens: number
+  temperature?: number
   json?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high'
 }) {
@@ -58,6 +65,7 @@ export function buildAiResponsesBody(input: {
       content: [{ type: 'input_text', text: message.content }],
     })),
     max_output_tokens: input.maxTokens,
+    ...temperatureParameter(input.temperature),
     ...(input.reasoningEffort ? { reasoning: { effort: input.reasoningEffort } } : {}),
     ...(input.json ? { text: { format: { type: 'json_object' } } } : {}),
   }
@@ -67,11 +75,13 @@ export function buildAiChatFallbackBody(input: {
   model: string
   messages: AiGatewayMessage[]
   maxTokens: number
+  temperature?: number
 }) {
   return {
     model: input.model,
     messages: input.messages,
     max_tokens: input.maxTokens,
+    ...temperatureParameter(input.temperature),
   }
 }
 
@@ -86,6 +96,7 @@ export async function requestAiGatewayCompletion(input: {
   model: string
   messages: AiGatewayMessage[]
   maxTokens: number
+  temperature?: number
   timeoutMs: number
   json?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high'

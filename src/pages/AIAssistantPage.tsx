@@ -22,6 +22,7 @@ import {
 } from '../components/AiTaskConversationMessage'
 import { AiQaCards, type ProjectQaAnswer } from '../components/AiQaCards'
 import { AssistantExperiencePanel } from '../components/AssistantExperiencePanel'
+import { AgentStudio } from '../components/AgentStudio'
 import { AiErrorBoundary, copyAiErrorId, createAiErrorId } from '../components/AiErrorBoundary'
 import { useToast } from '../components/Toast'
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete, ApiError } from '../lib/api'
@@ -908,7 +909,11 @@ async function downloadRemoteUrl(url: string, filename: string): Promise<void> {
   }
 }
 
-function Chat() {
+function Chat({ onOpenAgentBuilder, onCloseAgentBuilder, builderOpen }: {
+  onOpenAgentBuilder: () => void
+  onCloseAgentBuilder: () => void
+  builderOpen: boolean
+}) {
   const [searchParams] = useSearchParams()
   const projects = useAppStore((state) => state.projects)
   const files = useAppStore((state) => state.files)
@@ -1783,14 +1788,23 @@ function Chat() {
           }
           localStorage.removeItem(LS_KEY)
         } catch { /* ignore legacy migration errors */ }
+        const requestedConversationId = searchParams.get('conversation')
+        if (requestedConversationId && !mapped.some((session) => session.rowId === requestedConversationId || session.agentId === requestedConversationId)) {
+          const row = await apiGet<{ id: string; agentId?: string; title: string; scope: string; projectId?: string | null; projectName?: string | null }>(`/conversations/${encodeURIComponent(requestedConversationId)}`)
+          mapped = [{ rowId: row.id, agentId: row.agentId || row.id, title: row.title,
+            scope: row.scope === 'global' || !row.projectId ? 'global' : 'project',
+            projectId: row.projectId ?? null, projectName: row.projectName ?? null }, ...mapped]
+        }
         setSessions(mapped)
         if (mapped.length) {
           // 从项目页进入 AI 时，必须优先进入同项目会话，不能恢复其他项目的
           // 上次会话后仍把头部显示成 URL 项目。若该项目还没有会话，则要求
           // 用户创建项目会话，避免第一条快捷任务落到旧项目。
-          const requestedSession = requestedProjectId
+          const requestedSession = (requestedConversationId
+            ? mapped.find((session) => session.rowId === requestedConversationId || session.agentId === requestedConversationId)
+            : undefined) ?? (requestedProjectId
             ? mapped.find((session) => session.projectId === requestedProjectId)
-            : undefined
+            : undefined)
           if (requestedProjectId && !requestedSession) {
             setNewSessionProjectId(requestedProjectId)
             setNewSessionOpen(true)
@@ -1961,6 +1975,8 @@ function Chat() {
     }
   }
 
+  if (builderOpen) return <AgentStudio onClose={onCloseAgentBuilder} />
+
   return (
     <div className={`fde-ai-page relative -m-6 flex h-[calc(100vh-64px)] min-h-[720px] overflow-hidden bg-white${mobileSessionsOpen ? ' is-sessions-open' : ''}`}>
       <button className="fde-ai-sessions-backdrop" aria-label="关闭会话列表" onClick={() => setMobileSessionsOpen(false)} />
@@ -1970,6 +1986,11 @@ function Chat() {
             <MessageSquarePlus className="h-4 w-4" />新建会话
           </Button>
           <button className="fde-ai-sessions-close" aria-label="关闭会话列表" onClick={() => setMobileSessionsOpen(false)}><X /></button>
+        </div>
+        <div className="px-4 pb-3">
+          <Button variant="secondary" className="w-full" onClick={onOpenAgentBuilder}>
+            <Bot className="h-4 w-4" />我的 Agents · 创建
+          </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-3">
           <p className="px-2 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400">会话历史</p>
@@ -2500,5 +2521,15 @@ function Chat() {
 }
 
 export function AIAssistantPage() {
-  return <Chat />
+  const [params, setParams] = useSearchParams()
+  const builderOpen = params.get('view') === 'agents'
+  const setBuilderOpen = (open: boolean) => {
+    setParams((previous) => {
+      const next = new URLSearchParams(previous)
+      if (open) next.set('view', 'agents')
+      else next.delete('view')
+      return next
+    })
+  }
+  return <Chat builderOpen={builderOpen} onOpenAgentBuilder={() => setBuilderOpen(true)} onCloseAgentBuilder={() => setBuilderOpen(false)} />
 }

@@ -6,6 +6,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ConfigurationRevisionPanel, type ConfigurationRevisionTarget } from '../components/ConfigurationRevisionPanel'
 import { Modal } from '../components/ui'
+import { AgentStudio } from '../components/AgentStudio'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api'
 import { createCapabilityZip, scanCapabilityFolder, scanCapabilityZip, type CapabilityImportCandidate } from '../lib/capabilityPackage'
 import { shanghaiDateKey } from '../lib/dateTime'
@@ -50,6 +51,7 @@ function Toggle({ value, disabled, onChange, label }: { value: boolean; disabled
 }
 
 export function CapabilitySettingsPage() {
+  const [builderOpen, setBuilderOpen] = useState(false)
   const [settings, setSettings] = useState<Settings>({ capabilities: [], bindings: [], projects: [] })
   const [tab, setTab] = useState<Capability['kind']>('skill')
   const [view, setView] = useState<'catalog' | 'bindings'>('catalog')
@@ -196,6 +198,8 @@ export function CapabilitySettingsPage() {
 
   const activeTab = tabs.find((item) => item.key === tab)!
 
+  if (builderOpen) return <AgentStudio onClose={() => setBuilderOpen(false)} />
+
   return <div className="jw-admin-page">
     <div className="jw-page-header"><div><h1>能力管理</h1><p>按 JW 工作台方式管理 Skills、Agents、MCP 与 Plugins</p></div></div>
     {notice && <div className={`jw-notice ${notice.tone}`}><span>{notice.tone === 'ok' ? <Check className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}</span>{notice.text}<button aria-label="关闭提示" onClick={() => setNotice(null)}><X className="h-4 w-4" /></button></div>}
@@ -211,6 +215,7 @@ export function CapabilitySettingsPage() {
         {view === 'catalog' ? <>
           <div className="jw-tab-header"><div><activeTab.icon className="h-4 w-4" /><strong>{activeTab.label} ({visible.length})</strong></div><button className="jw-icon-btn" title="刷新" onClick={() => void refresh()}><RefreshCw className="h-4 w-4" /></button></div>
           <div className="jw-tab-toolbar">
+            {tab === 'agent' && <button className="jw-primary-button" onClick={() => setBuilderOpen(true)}><CirclePlus className="h-4 w-4" />创建 Agent</button>}
             <label><Search className="h-4 w-4" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索 ${activeTab.label}`} /><button aria-label="清空搜索" className={search ? '' : 'invisible'} onClick={() => setSearch('')}><X className="h-3.5 w-3.5" /></button></label>
             <div className="jw-toolbar-button-group"><button title={`导入 ${activeTab.label}`} aria-label={`导入 ${activeTab.label}`} onClick={openImport}><Upload className="h-4 w-4" /></button><button title={`导出 ${activeTab.label}`} aria-label={`导出 ${activeTab.label}`} disabled={busy !== ''} onClick={() => void exportCapabilities()}><Download className="h-4 w-4" /></button></div>
             <button className="jw-secondary-button" disabled={busy !== ''} onClick={() => void mutate('sync', () => apiPost('/ai/capabilities/sync'), '内置能力目录已同步。')}><RefreshCw className="h-4 w-4" />同步内置目录</button>

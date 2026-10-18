@@ -856,6 +856,8 @@
     { "idx": 133, "version": "5", "when": 1793432962000, "tag": "0133_stabilize_due_diligence_workbench", "breakpoints": true
     },
     { "idx": 134, "version": "5", "when": 1793432963000, "tag": "0134_add_twin_avatars_and_skill_library", "breakpoints": true
+    },
+    { "idx": 135, "version": "5", "when": 1793432964000, "tag": "0135_add_project_management_access", "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull, ne, not, or, sql, type SQL } from 'drizzle-orm'
 import { db } from '../db/client.js'
-import { aiTasks, aiTaskSources, companyKnowledge, companyKnowledgeGrants, knowledgeChunks, oaApprovalNodes, oaApprovalRequests, projectDutyAssignments, projectFileGrants, projectFiles, projects, roles, userRoles, users } from '../db/schema.js'
-import { projectAccessCondition } from './projectAccessService.js'
+import { aiTasks, aiTaskSources, companyKnowledge, companyKnowledgeGrants, knowledgeChunks, oaApprovalNodes, oaApprovalRequests, projectDutyAssignments, projectFileGrants, projectFiles, projectManagementAccessPolicies, projects, roles, userRoles, users } from '../db/schema.js'
+import { projectAccessCondition, projectEditCondition } from './projectAccessService.js'
 import { enabledSystemAdminCondition } from './systemAdminAccessService.js'
 
 export type FileTx = Parameters<Parameters<typeof db.transaction>[0]>[0]
@@ -10,8 +10,12 @@ export type FileOperation = 'view' | 'download' | 'manage' | 'delete'
 export const fileError = (code: string, message: string, status = 409) => Object.assign(new Error(message), { code, status })
 
 // Current identity and project scope are mandatory even when a historical grant remains.
-function currentProjectScope(userId: string | SQL) {
-  return or(projectAccessCondition({ uid: userId, name: '', role: '' }), and(ne(projects.workflowModel, 'fde-v1'), sql`EXISTS (SELECT 1 FROM ${users} admin_actor WHERE admin_actor.id=${userId} AND admin_actor.role='系统管理员')`))!
+function unconfiguredAdminFileScope(userId: string | SQL) {
+  return and(enabledSystemAdminCondition(userId), sql`NOT EXISTS (SELECT 1 FROM ${projectManagementAccessPolicies} pa WHERE pa.user_id=${userId} AND pa.mode='custom')`)
+}
+function currentProjectScope(userId: string | SQL, access: 'read' | 'edit' = 'read') {
+  const actor = { uid: userId, name: '', role: '' }
+  return or(access === 'edit' ? projectEditCondition(actor) : projectAccessCondition(actor), and(ne(projects.workflowModel, 'fde-v1'), unconfiguredAdminFileScope(userId)))!
 }
 function businessRole(userId: string | SQL) {
   return sql<boolean>`(${projects.ownerUserId}=${userId} OR EXISTS (SELECT 1 FROM ${projectDutyAssignments} fd WHERE fd.project_id=${projects.id} AND fd.user_id=${userId} AND fd.duty='secretary') OR EXISTS (SELECT 1 FROM ${userRoles} fu JOIN ${roles} fr ON fr.id=fu.role_id WHERE fu.user_id=${userId} AND fr.status='启用' AND fr.fde_category NOT IN ('system_admin','coordinator')))`
@@ -47,11 +51,11 @@ function currentApprovalMaterialScope(userId: string | SQL) {
 export function projectFileAccessCondition(userId: string | SQL, operation: FileOperation = 'view', includeDeleted = false) {
   const grant = sql<boolean>`EXISTS (SELECT 1 FROM ${projectFileGrants} fg WHERE fg.file_id=${projectFiles.id} AND fg.user_id=${userId} AND fg.can_view=1 ${operation === 'download' ? sql`AND fg.can_download=1` : sql``})`
   const fdeOperation = operation === 'manage' ? manager(userId) : operation === 'delete' ? or(manager(userId), eq(projectFiles.uploadedBy, userId))! : or(and(financeScope(userId), or(eq(projectFiles.accessMode, 'project'), grant)), operation === 'view' ? currentApprovalMaterialScope(userId) : undefined)!
-  const projectScope = and(currentProjectScope(userId), or(ne(projects.workflowModel, 'fde-v1'), and(businessRole(userId), fdeOperation)))
+  const projectScope = and(currentProjectScope(userId, operation === 'manage' || operation === 'delete' ? 'edit' : 'read'), or(ne(projects.workflowModel, 'fde-v1'), and(businessRole(userId), fdeOperation)))
   return and(
     sql`EXISTS (SELECT 1 FROM ${users} enabled_file_actor WHERE enabled_file_actor.id=${userId} AND enabled_file_actor.status='启用')`,
     includeDeleted ? undefined : eq(projectFiles.lifecycle, 'active'),
-    inArray(projectFiles.projectId, db.select({ id: projects.id }).from(projects).where(or(enabledSystemAdminCondition(userId), projectScope))),
+    inArray(projectFiles.projectId, db.select({ id: projects.id }).from(projects).where(or(unconfiguredAdminFileScope(userId), projectScope))),
   )!
 }
 
@@ -68,8 +72,8 @@ export async function requireProjectFileAccess(executor: FileExecutor, fileId: s
 // Workspace eligibility does not depend on whether any file has been uploaded.
 // Individual files still require projectFileAccessCondition, including their ACL.
 export function projectFileWorkspaceCondition(userId: string, operation: 'view' | 'upload' = 'view') {
-  const standardWorkspaceScope = and(currentProjectScope(userId), or(ne(projects.workflowModel, 'fde-v1'), and(businessRole(userId), operation === 'upload' ? eq(projects.lifecycle, 'active') : undefined)))!
-  return and(sql`EXISTS (SELECT 1 FROM ${users} workspace_actor WHERE workspace_actor.id=${userId} AND workspace_actor.status='启用')`, or(enabledSystemAdminCondition(userId), standardWorkspaceScope))!
+  const standardWorkspaceScope = and(currentProjectScope(userId, operation === 'upload' ? 'edit' : 'read'), or(ne(projects.workflowModel, 'fde-v1'), and(businessRole(userId), operation === 'upload' ? eq(projects.lifecycle, 'active') : undefined)))!
+  return and(sql`EXISTS (SELECT 1 FROM ${users} workspace_actor WHERE workspace_actor.id=${userId} AND workspace_actor.status='启用')`, or(unconfiguredAdminFileScope(userId), standardWorkspaceScope))!
 }
 
 export async function requireProjectFileUpload(executor: FileExecutor, projectId: string, userId: string) {

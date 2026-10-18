@@ -3,11 +3,17 @@ import { z } from 'zod'
 import type { AuthedRequest } from '../middleware/requireAuth.js'
 import { addMeetingContribution, archiveExpiredCompletedPersonalTodos, createMeeting, createTodo, deleteMeetingRecord, deleteTodo, finalizeMeeting, getMeeting, getTodo, listMeetingTodos, listMeetings, listTodos, presentMeeting, presentMeetings, readMeetingNotice, todoCounts, updateMeeting, updateMeetingLifecycle, updateTodo } from '../services/meetingService.js'
 import { answerQuestion, meetingSummary } from '../services/aiService.js'
-import { requireAccessibleProject } from '../services/projectAccessService.js'
+import { requireAccessibleProject, requireEditableProject } from '../services/projectAccessService.js'
 import { parseShanghaiDateTime } from '../utils/shanghaiTime.js'
 
 export const meetingsRouter = Router()
 const routeId = (value: string | string[]) => z.string().min(1).parse(value)
+
+async function requireEditableLinkedMeeting(req: AuthedRequest, meetingId: string) {
+  const meeting = await getMeeting(meetingId, req.user!)
+  if (!meeting) throw Object.assign(new Error('会议不存在'), { status: 404, code: 'NOT_FOUND' })
+  if (meeting.projectId) await requireEditableProject(req.user!.uid, meeting.projectId)
+}
 
 meetingsRouter.get('/', async (req: AuthedRequest, res, next) => {
   try {
@@ -75,7 +81,7 @@ meetingsRouter.post('/', async (req: AuthedRequest, res, next) => {
       body.projectId,
       ...body.newTodos.map((todo) => todo.projectId),
     ].filter((value): value is string => Boolean(value)))
-    await Promise.all([...projectIds].map((projectId) => requireAccessibleProject(req.user!.uid, projectId)))
+    await Promise.all([...projectIds].map((projectId) => requireEditableProject(req.user!.uid, projectId)))
     const startedAt = parseMeetingTime(body.meetingTime)
     const endsAt = body.meetingEndTime ? parseMeetingTime(body.meetingEndTime) : null
     if (endsAt && endsAt <= startedAt) {
@@ -106,9 +112,10 @@ meetingsRouter.patch('/:id', async (req: AuthedRequest, res, next) => {
   try {
     const existing = await getMeeting(routeId(req.params.id), req.user!)
     if (!existing) { res.status(404).json({ code: 'NOT_FOUND', message: '会议不存在', details: null }); return }
+    if (existing.projectId) await requireEditableProject(req.user!.uid, existing.projectId)
     const { expectedVersion, ...body } = PatchSchema.parse(req.body)
     if (typeof body.projectId === 'string') {
-      await requireAccessibleProject(req.user!.uid, body.projectId)
+      await requireEditableProject(req.user!.uid, body.projectId)
     }
     const patch = {
       ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
@@ -135,6 +142,7 @@ const ContributionSchema = z.object({
 
 meetingsRouter.post('/:id/contributions', async (req: AuthedRequest, res, next) => {
   try {
+    await requireEditableLinkedMeeting(req, routeId(req.params.id))
     const input = ContributionSchema.parse(req.body)
     const row = await addMeetingContribution({ meetingId: routeId(req.params.id), userId: req.user!.uid, ...input })
     res.status(201).json(await presentMeeting(row, req.user!.uid))
@@ -144,6 +152,7 @@ meetingsRouter.post('/:id/contributions', async (req: AuthedRequest, res, next) 
 const LifecycleSchema = z.object({ expectedVersion: z.number().int().positive(), action: z.enum(['start', 'end', 'cancel']) }).strict()
 meetingsRouter.post('/:id/lifecycle', async (req: AuthedRequest, res, next) => {
   try {
+    await requireEditableLinkedMeeting(req, routeId(req.params.id))
     const input = LifecycleSchema.parse(req.body)
     const row = await updateMeetingLifecycle({ meetingId: routeId(req.params.id), userId: req.user!.uid, ...input })
     res.json(await presentMeeting(row, req.user!.uid))
@@ -157,6 +166,7 @@ const DeleteMeetingSchema = z.object({
 }).strict()
 meetingsRouter.delete('/:id', async (req: AuthedRequest, res, next) => {
   try {
+    await requireEditableLinkedMeeting(req, routeId(req.params.id))
     const input = DeleteMeetingSchema.parse(req.body)
     res.json(await deleteMeetingRecord({ meetingId: routeId(req.params.id), userId: req.user!.uid, userName: req.user!.name, ...input }))
   } catch (err) { next(err) }
@@ -170,6 +180,7 @@ const FinalizeSchema = z.object({
 }).strict()
 meetingsRouter.post('/:id/finalize', async (req: AuthedRequest, res, next) => {
   try {
+    await requireEditableLinkedMeeting(req, routeId(req.params.id))
     const input = FinalizeSchema.parse(req.body)
     const row = await finalizeMeeting({ meetingId: routeId(req.params.id), userId: req.user!.uid, userName: req.user!.name, ...input })
     res.json({ ...await presentMeeting(row, req.user!.uid), createdTodos: await listMeetingTodos(row.id, req.user!) })
@@ -230,7 +241,7 @@ const TodoPatchSchema = TodoSchema.partial().extend({
 todosRouter.post('/', async (req: AuthedRequest, res, next) => {
   try {
     const body = TodoSchema.parse(req.body)
-    if (body.projectId) await requireAccessibleProject(req.user!.uid, body.projectId)
+    if (body.projectId) await requireEditableProject(req.user!.uid, body.projectId)
     const row = await createTodo(body as never, req.user!.uid)
     res.status(201).json(row)
   } catch (err) { next(err) }
@@ -240,9 +251,10 @@ todosRouter.patch('/:id', async (req: AuthedRequest, res, next) => {
   try {
     const existing = await getTodo(routeId(req.params.id), req.user!)
     if (!existing) { res.status(404).json({ code: 'NOT_FOUND', message: '待办不存在', details: null }); return }
+    if (existing.projectId) await requireEditableProject(req.user!.uid, existing.projectId)
     const { expectedVersion, ...patch } = TodoPatchSchema.parse(req.body)
     if (typeof patch.projectId === 'string') {
-      await requireAccessibleProject(req.user!.uid, patch.projectId)
+      await requireEditableProject(req.user!.uid, patch.projectId)
     }
     const row = await updateTodo(existing.id, patch, expectedVersion)
     res.json(row)
@@ -261,6 +273,7 @@ todosRouter.delete('/:id', async (req: AuthedRequest, res, next) => {
   try {
     const existing = await getTodo(routeId(req.params.id), req.user!)
     if (!existing) { res.status(404).json({ code: 'NOT_FOUND', message: '待办不存在', details: null }); return }
+    if (existing.projectId) await requireEditableProject(req.user!.uid, existing.projectId)
     const row = await deleteTodo(existing.id)
     res.json({ ok: true, deleted: row })
   } catch (err) { next(err) }

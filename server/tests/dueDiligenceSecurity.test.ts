@@ -47,9 +47,22 @@ test('every project route applies the source authorization boundary', () => {
   for (const node of source.statements) {
     if (!ts.isExpressionStatement(node) || !ts.isCallExpression(node.expression)) continue
     const call = node.expression
-    if (!call.expression.getText(source).startsWith('dueDiligenceRouter.') || !ts.isStringLiteral(call.arguments[0]) || !call.arguments[0].text.startsWith('/projects/')) continue
+    if (!/^dueDiligenceRouter\.(get|post|patch|put|delete)$/.test(call.expression.getText(source)) || !ts.isStringLiteral(call.arguments[0]) || !call.arguments[0].text.startsWith('/projects/')) continue
     assert.match(call.arguments[1].getText(source), /await requireDueDiligenceProject\(/, call.arguments[0].text)
   }
+})
+
+test('project due diligence writes require project edit access', async () => {
+  const guard = route('use', '/projects/:projectId', {
+    z: { string: () => ({ uuid: () => ({ parse: (value: string) => value }) }) },
+    requireEditableProject: async () => { throw Object.assign(new Error('read only'), { status: 403 }) },
+  })
+  let rejection: unknown
+  await guard({ method: 'POST', params: { projectId: 'project' }, user: { uid: 'user' } }, {}, (error?: unknown) => { rejection = error })
+  assert.equal((rejection as { status: number }).status, 403)
+  rejection = 'not called'
+  await guard({ method: 'GET', params: { projectId: 'project' }, user: { uid: 'user' } }, {}, (error?: unknown) => { rejection = error })
+  assert.equal(rejection, undefined)
 })
 
 test('listing learning candidates never scans materials or calls the model', async () => {

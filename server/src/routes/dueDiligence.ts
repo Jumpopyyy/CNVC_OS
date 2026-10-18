@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { db } from '../db/client.js'
 import { auditLogs, companyKnowledge, digitalTwinAssetArchives, digitalTwinConversations, digitalTwinExperienceEvents, digitalTwinInvocationLogs, digitalTwinLearningCandidates, digitalTwinPrivateAssets, digitalTwinPublications, digitalTwinSkillImports, digitalTwinSkills, digitalTwinSkillVersions, digitalTwinUpdateCandidates, digitalTwins, digitalTwinVersions, dueDiligenceInterviewArtifacts, dueDiligenceInterviewPrompts, dueDiligenceInterviewTranscripts, dueDiligenceInterviews, dueDiligenceQuestionEvidence, dueDiligenceQuestionPacks, dueDiligenceQuestions, dueDiligenceTranscriptionJobs, personalNotes, projectFiles, projectMembers, projects, risks, users } from '../db/schema.js'
 import type { AuthedRequest } from '../middleware/requireAuth.js'
-import { projectAccessCondition, requireAccessibleProject } from '../services/projectAccessService.js'
+import { projectAccessCondition, requireAccessibleProject, requireEditableProject } from '../services/projectAccessService.js'
 import { canReadAllProjectFiles, projectFileAccessCondition, projectSummaryFileAccessCondition, requireProjectFileAccess } from '../services/projectFileAccessService.js'
 import { parseShanghaiDateTime } from '../utils/shanghaiTime.js'
 import { createConversation } from '../services/conversationService.js'
@@ -19,6 +19,10 @@ import { resolveAiModelRoute } from '../services/aiModelSettingsService.js'
 import { buildDueDiligenceQuestionPackDocx } from '../services/dueDiligenceQuestionPackDocxService.js'
 
 export const dueDiligenceRouter = Router()
+dueDiligenceRouter.use('/projects/:projectId', async (req: AuthedRequest, _res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  try { await requireEditableProject(req.user!.uid, z.string().uuid().parse(req.params.projectId)); next() } catch (error) { next(error) }
+})
 const DUE_DILIGENCE_API_VERSION = 2
 const DUE_DILIGENCE_SCHEMA_VERSION = '0134_add_twin_avatars_and_skill_library'
 const routeId = (value: string | string[]) => z.string().uuid().parse(value)

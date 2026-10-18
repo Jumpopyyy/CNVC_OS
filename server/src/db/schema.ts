@@ -514,6 +514,25 @@ export const projectMembers = mysqlTable('project_members', {
   byUser: index('idx_project_members_user').on(t.userId, t.projectId),
 }))
 
+export const projectManagementAccessPolicies = mysqlTable('project_management_access_policies', {
+  userId: uuidColumn('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  mode: varchar('mode', { length: 8 }).notNull().default('custom'),
+  readScope: varchar('read_scope', { length: 8 }).notNull(),
+  editScope: varchar('edit_scope', { length: 8 }).notNull(),
+  version: int('version').notNull().default(1),
+  updatedAt: timestampColumn('updated_at').notNull().default(sql`CURRENT_TIMESTAMP(3)`),
+})
+
+export const projectManagementAccessGrants = mysqlTable('project_management_access_grants', {
+  userId: uuidColumn('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  projectId: uuidColumn('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  canView: boolean('can_view').notNull(),
+  canEdit: boolean('can_edit').notNull(),
+}, (t) => ({
+  uniqueGrant: uniqueIndex('uq_project_management_access_grant').on(t.userId, t.projectId),
+  byProject: index('idx_project_management_access_project').on(t.projectId, t.userId),
+}))
+
 // 项目评分的排队、租约、重试和重启恢复状态。projects.scoring 只保存最近一次
 // 成功评分结果；执行中的权威状态必须来自本表，不能依赖单进程内存。
 export const projectScoreJobs = mysqlTable('project_score_jobs', {

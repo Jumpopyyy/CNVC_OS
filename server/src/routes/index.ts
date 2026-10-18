@@ -28,6 +28,7 @@ import { aiTasksRouter } from './aiTasks.js'
 import { jwAgentRouter } from './jwAgent.js'
 import { aiModelSettingsRouter } from './aiModelSettings.js'
 import { aiCapabilitiesRouter } from './aiCapabilities.js'
+import { agentBlueprintsRouter } from './agentBlueprints.js'
 import { createPromptLibraryRouter } from './promptLibrary.js'
 import { createPromptLibraryService } from '../services/promptLibraryService.js'
 import { mysqlPromptLibraryRepository } from '../repositories/mysql/mysqlPromptLibraryRepository.js'
@@ -81,6 +82,7 @@ apiRouter.use('/ai', aiTasksRouter)
 apiRouter.use('/agent', jwAgentRouter)
 apiRouter.use('/ai/model-settings', aiModelSettingsRouter)
 apiRouter.use('/ai/capabilities', aiCapabilitiesRouter)
+apiRouter.use('/agent-blueprints', agentBlueprintsRouter)
 apiRouter.use('/ai/prompt-library', createPromptLibraryRouter(createPromptLibraryService(
   mysqlPromptLibraryRepository,
   BUILTIN_PROMPT_TEMPLATES,

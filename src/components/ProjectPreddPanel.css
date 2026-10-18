@@ -1,0 +1,26 @@
+.project-predd-panel { display: grid; gap: 14px; color: #334155; font-size: 14px; }
+.project-predd-panel p { margin: 0; }
+.project-predd-methodology { font-weight: 600; overflow-wrap: anywhere; }
+.project-predd-hint { color: #64748b; line-height: 1.7; }
+.project-predd-field { display: grid; gap: 7px; font-weight: 500; }
+.project-predd-field textarea, .project-predd-field select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: white; font-size: 14px; font-weight: 400; }
+.project-predd-field textarea { resize: vertical; }
+.project-predd-panel :is(button, a, input, textarea, select):focus-visible { outline: 2px solid #326bc2; outline-offset: 3px; }
+.project-predd-files { margin: 0; padding: 0; list-style: none; }
+.project-predd-files li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+.project-predd-files span { overflow-wrap: anywhere; min-width: 0; }
+.project-predd-files button, .project-predd-error button { color: #315f9e; text-decoration: underline; padding: 8px; }
+.project-predd-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.project-predd-actions a, .project-predd-panel [role="status"] a { color: #315f9e; text-decoration: underline; }
+.project-predd-error { color: #b91c1c; overflow-wrap: anywhere; }
+.project-predd-report { min-width: 0; border-top: 1px solid #e2e8f0; padding-top: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+.project-predd-report :is(h1, h2, h3) { margin: 18px 0 8px; font-size: 17px; font-weight: 600; color: #0f172a; }
+.project-predd-report p { margin: 8px 0; }
+.project-predd-report :is(ul, ol) { padding-left: 24px; list-style: revert; }
+.project-predd-report a { color: #315f9e; text-decoration: underline; }
+.project-predd-table { overflow-x: auto; margin: 12px 0; }
+.project-predd-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.project-predd-table :is(th, td) { padding: 8px 10px; border: 1px solid #e2e8f0; text-align: left; }
+.project-predd-table th { background: #f8fafc; }
+.project-predd-report pre { max-width: 100%; overflow: auto; }
+@media (max-width: 640px) { .project-predd-field input[type="file"] { width: 100%; } }

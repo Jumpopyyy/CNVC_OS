@@ -27,6 +27,7 @@ export interface Project {
   workflowModel?: 'legacy' | 'fde-v1'
   ownerUserId?: string
   isParticipant?: boolean
+  canEdit?: boolean
   participantRole?: 'owner' | 'collaborator' | string | null
   investmentFund?: string
   projectType?: string

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { listOfficePolicies, publishOfficePolicy, resolveOfficePolicyCommand, saveOfficePolicy, setOfficePolicyEnabled } from '../services/fdeOfficePolicyService.js'
 import { FDE_ROLE_CATEGORIES, type FdeRoleCategory } from '../contracts/fdeGovernanceContract.js'
+import { ProjectAccessScopeSchema, ProjectGrantSchema } from '../contracts/projectManagementAccessContract.js'
 import type { AuthedRequest } from '../middleware/requireAuth.js'
 import { requireSystemAdmin } from '../middleware/requireAuth.js'
 import { fdeWorkflowPolicySchema } from '../contracts/fdeWorkflowPolicyContract.js'
@@ -35,6 +36,10 @@ import {
   previewPermanentDeletion,
   searchPermanentDeletionTargets,
 } from '../services/adminPermanentDeletionService.js'
+import {
+  getProjectManagementAccess, listProjectManagementAccessPolicies,
+  saveProjectManagementAccess, searchProjectManagementAccessOptions,
+} from '../services/projectManagementAccessService.js'
 
 export const systemAdministrationRouter = Router()
 // Already authenticated by /api; only one's own minimal technical receipt.
@@ -113,6 +118,33 @@ systemAdministrationRouter.patch('/fde-policies/:id', async (req: AuthedRequest,
 
 systemAdministrationRouter.get('/', async (_req, res, next) => {
   try { res.json(await listSystemAdministration()) } catch (error) { next(error) }
+})
+
+systemAdministrationRouter.get('/project-access', async (_req, res, next) => {
+  try { res.set('Cache-Control', 'private, no-store').json(await listProjectManagementAccessPolicies()) } catch (error) { next(error) }
+})
+
+systemAdministrationRouter.get('/project-access/projects', async (req, res, next) => {
+  try {
+    const { keyword } = z.object({ keyword: z.string().trim().max(80).default('') }).parse(req.query)
+    res.set('Cache-Control', 'private, no-store').json(await searchProjectManagementAccessOptions(keyword))
+  } catch (error) { next(error) }
+})
+
+systemAdministrationRouter.get('/users/:id/project-access', async (req, res, next) => {
+  try { res.set('Cache-Control', 'private, no-store').json(await getProjectManagementAccess(routeId(req.params.id))) } catch (error) { next(error) }
+})
+
+systemAdministrationRouter.put('/users/:id/project-access', async (req: AuthedRequest, res, next) => {
+  try {
+    const expectedVersion = z.number().int().positive().nullable()
+    const body = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('inherit'), expectedVersion }).strict(),
+      z.object({ mode: z.literal('custom'), expectedVersion, readScope: ProjectAccessScopeSchema,
+        editScope: ProjectAccessScopeSchema, grants: z.array(ProjectGrantSchema).max(500) }).strict(),
+    ]).parse(req.body)
+    res.json(await saveProjectManagementAccess(routeId(req.params.id), body, actor(req)))
+  } catch (error) { next(error) }
 })
 
 systemAdministrationRouter.get('/investment-profile-dictionaries', async (_req, res, next) => {

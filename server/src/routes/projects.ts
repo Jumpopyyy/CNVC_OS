@@ -17,7 +17,7 @@ import {
   replaceFileContent, setFileStoragePath, updateProject, updateProjectAsAdministrator, deleteProject, pinProject, listAllFiles,
 } from '../services/projectService.js'
 import { openProjectFile, projectFileContentType, projectFilePreviewContentType, readProjectFileBuffer, removeProjectFile, saveProjectFileRevision } from '../services/projectFileStorageService.js'
-import { requireAccessibleProject } from '../services/projectAccessService.js'
+import { canEditProject, requireAccessibleProject, requireEditableProject, requireProjectCreationAccess } from '../services/projectAccessService.js'
 import { canonicalizeProjectTextBuffer, decodeAndValidateProjectFile } from '../security/projectFileValidation.js'
 import { enqueueProjectScoreJob, getProjectScoreJob } from '../services/projectScoreJobService.js'
 import { writeAudit } from '../services/auditService.js'
@@ -38,6 +38,10 @@ import { createPostInvestmentUpdate, listPostInvestmentUpdates } from '../servic
 import { ADMIN_EDITABLE_PROJECT_STAGES, canAdministrativelyEditProject } from '../contracts/projectAdminEditContract.js'
 
 export const projectsRouter = Router()
+projectsRouter.use('/:id', async (req: AuthedRequest, _res, next) => {
+  if (req.params.id === 'files' || req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  try { await requireEditableProject(req.user!.uid, routeId(req.params.id)); next() } catch (error) { next(error) }
+})
 projectsRouter.get('/:id/post-investment-updates', async (req: AuthedRequest, res, next) => { try { res.json({ list: await listPostInvestmentUpdates(routeId(req.params.id), req.user!.uid) }) } catch (error) { next(error) } })
 projectsRouter.post('/:id/post-investment-updates', async (req: AuthedRequest, res, next) => { try { res.status(201).json(await createPostInvestmentUpdate({ projectId: routeId(req.params.id), userId: req.user!.uid, content: z.string().trim().min(1).parse(req.body.content), fileIds: z.array(z.string().uuid()).default([]).parse(req.body.fileIds), leaderIds: z.array(z.string().uuid()).default([]).parse(req.body.leaderIds) })) } catch (error) { next(error) } })
 const routeId = (value: string | string[]) => z.string().min(1).parse(value)
@@ -142,10 +146,22 @@ projectsRouter.get('/files/:id/workspace', async (req: AuthedRequest, res, next)
   try { res.json(await getFdeFile(routeId(req.params.id), req.user!.uid, req.query)) } catch (error) { next(error) }
 })
 projectsRouter.post('/files/:id/permissions', async (req: AuthedRequest, res, next) => {
-  try { res.json(await setFdeFilePermissions(routeId(req.params.id), req.user!.uid, req.body)) } catch (error) { next(error) }
+  try {
+    const fileId = routeId(req.params.id)
+    const file = await getFile(fileId)
+    if (!file) { res.status(404).json({ code: 'NOT_FOUND', message: '文件不存在' }); return }
+    await requireEditableProject(req.user!.uid, file.projectId)
+    res.json(await setFdeFilePermissions(fileId, req.user!.uid, req.body))
+  } catch (error) { next(error) }
 })
 projectsRouter.post('/files/:id/lifecycle', async (req: AuthedRequest, res, next) => {
-  try { res.json(await actOnFdeFile(routeId(req.params.id), req.user!.uid, req.body)) } catch (error) { next(error) }
+  try {
+    const fileId = routeId(req.params.id)
+    const file = await getFile(fileId)
+    if (!file) { res.status(404).json({ code: 'NOT_FOUND', message: '文件不存在' }); return }
+    await requireEditableProject(req.user!.uid, file.projectId)
+    res.json(await actOnFdeFile(fileId, req.user!.uid, req.body))
+  } catch (error) { next(error) }
 })
 
 projectsRouter.get('/:id/records', async (req: AuthedRequest, res, next) => {
@@ -276,7 +292,7 @@ projectsRouter.get('/:id', async (req: AuthedRequest, res, next) => {
     await requireAccessibleProject(req.user!.uid, projectId)
     const row = await getProject(projectId)
     if (!row) { res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在', details: null }); return }
-    res.json(row)
+    res.json({ ...row, canEdit: await canEditProject(req.user!.uid, projectId) })
   } catch (err) { next(err) }
 })
 
@@ -408,6 +424,7 @@ projectsRouter.patch('/:id/classification', async (req: AuthedRequest, res, next
 
 projectsRouter.post('/', async (req: AuthedRequest, res, next) => {
   try {
+    await requireProjectCreationAccess(req.user!.uid)
     const { governance, ...body } = ProjectQuickCreateSchema.parse(req.body)
     const row = await createProject({
       ...body,
@@ -567,6 +584,7 @@ projectsRouter.post('/files/upload', async (req: AuthedRequest, res, next) => {
       dataBase64: z.string().min(1),
       force: z.boolean().optional(),
     }).parse(req.body)
+    await requireEditableProject(req.user!.uid, body.projectId)
     await requireProjectFileUpload(db, body.projectId, req.user!.uid)
     // 查重：同项目下同名文件已存在则拦截（除非 force）
     if (!body.force) {
@@ -616,7 +634,7 @@ projectsRouter.post('/files/:id/content', async (req: AuthedRequest, res, next) 
       res.status(404).json({ code: 'NOT_FOUND', message: '资料记录不存在', details: null })
       return
     }
-    await requireAccessibleProject(req.user!.uid, file.projectId)
+    await requireEditableProject(req.user!.uid, file.projectId)
     await requireProjectFileAccess(db, file.id, req.user!.uid, 'delete')
     const body = z.object({
       name: z.string().min(1),
@@ -763,7 +781,7 @@ projectsRouter.delete('/files/:id', async (req: AuthedRequest, res, next) => {
     const fileId = routeId(req.params.id)
     const file = await getFile(fileId)
     if (!file) { res.status(404).json({ code: 'NOT_FOUND', message: '文件不存在' }); return }
-    const project = await requireAccessibleProject(req.user!.uid, file.projectId)
+    const project = await requireEditableProject(req.user!.uid, file.projectId)
     if (project.workflowModel === 'fde-v1') {
       res.json(await actOnFdeFile(fileId, req.user!.uid, { ...req.body, action: 'trash' }))
       return

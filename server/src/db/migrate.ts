@@ -69,7 +69,7 @@ async function verifyMySqlRuntime(): Promise<void> {
 }
 
 const REQUIRED_RUNTIME_TABLES = [
-  'users', 'auth_sessions', 'auth_legacy_bearer_policy', 'projects', 'project_classification_history', 'project_members', 'project_score_jobs', 'project_files', 'project_file_versions',
+  'users', 'auth_sessions', 'auth_legacy_bearer_policy', 'projects', 'project_classification_history', 'project_members', 'project_management_access_policies', 'project_management_access_grants', 'project_score_jobs', 'project_files', 'project_file_versions',
   'project_stage_materials', 'project_plans', 'project_plan_actions',
   'project_duty_assignments', 'project_governance_changes',
   'fde_workflow_policies', 'fde_workflow_policy_versions',

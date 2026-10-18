@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { AuthedRequest } from '../middleware/requireAuth.js'
 import { createRisk, getRisk, listRisks, presentRisk, presentRisks, riskCounts, updateRisk } from '../services/riskService.js'
-import { requireAccessibleProject } from '../services/projectAccessService.js'
+import { requireAccessibleProject, requireEditableProject } from '../services/projectAccessService.js'
 import { parseShanghaiDate } from '../utils/shanghaiTime.js'
 
 export const risksRouter = Router()
@@ -53,7 +53,7 @@ function riskDate(value: string) {
 risksRouter.post('/', async (req: AuthedRequest, res, next) => {
   try {
     const body = RiskCreateSchema.parse(req.body)
-    if (body.projectId) await requireAccessibleProject(req.user!.uid, body.projectId)
+    if (body.projectId) await requireEditableProject(req.user!.uid, body.projectId)
     const row = await createRisk({
       projectId: body.projectId,
       projectName: body.projectName,
@@ -76,8 +76,9 @@ risksRouter.patch('/:id', async (req: AuthedRequest, res, next) => {
     const existing = await getRisk(riskId, req.user!)
     if (!existing) { res.status(404).json({ code: 'NOT_FOUND', message: '风险不存在', details: null }); return }
     const { expectedVersion, ...body } = RiskPatchSchema.parse(req.body)
+    if (existing.projectId) await requireEditableProject(req.user!.uid, existing.projectId)
     if (typeof body.projectId === 'string') {
-      await requireAccessibleProject(req.user!.uid, body.projectId)
+      await requireEditableProject(req.user!.uid, body.projectId)
     }
     const patch = {
       ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),

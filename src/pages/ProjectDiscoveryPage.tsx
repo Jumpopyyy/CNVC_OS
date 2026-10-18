@@ -6,6 +6,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { encodeInstitutionTrackingKey } from '../../server/src/contracts/institutionTrackingContract'
 import { EmptyState, Modal } from '../components/ui'
 import { DiscoveryMonitoringPanel } from '../components/DiscoveryMonitoringPanel'
+import { ProjectPreddPanel } from '../components/ProjectPreddPanel'
 import { apiGet, apiPatch, apiPost } from '../lib/api'
 import { buildSaiDiscoverySnapshot } from '../lib/saiAgent'
 import { LEAD_POOL_INDUSTRIES, LEAD_POOL_REGIONS } from '../lib/leadPoolFilters'
@@ -31,6 +32,7 @@ import type { LeadListResponse } from '../store/useAppStore'
 import { useSaiPageContext } from '../store/useSaiPageContext'
 import type { LeadListItem, ProjectDiscoveryCardEdits } from '../types'
 import './ProjectDiscoveryPage.css'
+import '../components/ProjectPreddPanel.css'
 
 const periods: Array<{ value: ProjectDiscoveryPeriod; label: string }> = [
   { value: 'today', label: '今天新发现' },
@@ -93,6 +95,7 @@ export function ProjectDiscoveryPage() {
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
+  const [preddLead, setPreddLead] = useState<LeadListItem | null>(null)
   const [action, setAction] = useState<'refresh' | 'upload' | ''>('')
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [saiUploadOpen, setSaiUploadOpen] = useState(false)
@@ -366,6 +369,7 @@ export function ProjectDiscoveryPage() {
               <DiscoveryCard
                 lead={lead}
                 onOpen={() => openLead(lead)}
+                onPredd={() => setPreddLead(lead)}
                 onCardUpdated={(card) => updateCandidateCard(lead.id, card)}
                 onKeywordsUpdated={(keywords) => updateCandidateKeywords(lead.id, keywords)}
                 onRemoved={(message) => removeCandidate(lead.id, message)}
@@ -375,12 +379,14 @@ export function ProjectDiscoveryPage() {
         <button type="button" disabled={loadingMore} onClick={() => void loadRemainingCandidates()}>{loadingMore ? '加载中…' : '加载更多项目'}</button>
       </div>}
     </section>
+    {preddLead && <ProjectPreddPanel key={preddLead.id} lead={{ id: preddLead.id, name: projectDiscoveryDisplayName(preddLead) }} onClose={() => setPreddLead(null)} />}
   </div>
 }
 
-function DiscoveryCard({ lead, onOpen, onCardUpdated, onKeywordsUpdated, onRemoved }: {
+function DiscoveryCard({ lead, onOpen, onPredd, onCardUpdated, onKeywordsUpdated, onRemoved }: {
   lead: LeadListItem
   onOpen: () => void
+  onPredd: () => void
   onCardUpdated: (card: ProjectDiscoveryCardEdits) => void
   onKeywordsUpdated: (keywords: ProjectDiscoveryKeyword[]) => void
   onRemoved: (message: string) => void
@@ -688,6 +694,7 @@ function DiscoveryCard({ lead, onOpen, onCardUpdated, onKeywordsUpdated, onRemov
           : <span className="project-discovery-news-missing">暂无可核验报道</span>}
       </div>
       <span />
+      <button type="button" className="predd-button" disabled={Boolean(cardAction)} onClick={onPredd}>项目 PreDD</button>
       <button type="button" className="defer-button" disabled={Boolean(cardAction)} onClick={() => { setConfirmDefer(true); setAssignmentOpen(false); setCardError('') }}>暂不跟进</button>
       <button type="button" className="convert-button" disabled={Boolean(cardAction)} onClick={() => void openAssignment()}>项目入库</button>
     </footer>}

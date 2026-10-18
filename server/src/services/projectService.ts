@@ -33,7 +33,7 @@ import {
 import { createMySqlIdentityRepositoryContext, identityRepositories } from '../repositories/index.js'
 import { sanitizeScoringCompetitors } from './competitorEvidence.js'
 import { removeOwnedProjectFile, removeProjectFileDirectory, removeProjectFileHistory } from './projectFileStorageService.js'
-import { projectAccessCondition, requireAccessibleProject } from './projectAccessService.js'
+import { projectAccessCondition, projectEditCondition, requireAccessibleProject } from './projectAccessService.js'
 import { syncProjectIdentityBindings } from './identityResolutionService.js'
 import { businessVersionConflict } from './businessOptimisticLock.js'
 import { activeWorkflowPolicyVersion } from './fdeWorkflowPolicyService.js'
@@ -141,9 +141,11 @@ function publicProject<T extends { scoring?: unknown }>(row: T): T {
 
 export async function listProjects(args: ListArgs, userId?: string) {
   const baseConditions = []
+  let accessActor: { id: string; name: string; role: string } | null = null
   if (userId) {
     const user = await identityRepositories.users.findById(userId)
     if (!user || user.status !== '启用') return { list: [], total: 0, page: args.page, pageSize: args.pageSize, counts: { normal: 0, key: 0 } }
+    accessActor = user
     baseConditions.push(projectAccessCondition({ uid: user.id, name: user.name, role: user.role }))
     if (args.scope === 'mine') {
       baseConditions.push(inArray(projects.id, db.select({ id: projectMembers.projectId }).from(projectMembers).where(eq(projectMembers.userId, user.id))))
@@ -186,9 +188,17 @@ export async function listProjects(args: ListArgs, userId?: string) {
       .from(projectMembers).where(and(eq(projectMembers.userId, userId), inArray(projectMembers.projectId, rows.map((row) => row.id))))
     : []
   const membershipByProject = new Map(memberships.map((membership) => [membership.projectId, membership.memberRole]))
+  const editableRows = accessActor && rows.length
+    ? await db.select({ id: projects.id }).from(projects).where(and(
+      inArray(projects.id, rows.map((row) => row.id)),
+      projectEditCondition({ uid: accessActor.id, name: accessActor.name, role: accessActor.role }),
+    ))
+    : []
+  const editableIds = new Set(editableRows.map((row) => row.id))
   return {
     list: rows.map((row) => publicProject({
       ...row,
+      canEdit: accessActor ? editableIds.has(row.id) : undefined,
       isParticipant: membershipByProject.has(row.id),
       participantRole: membershipByProject.get(row.id) ?? null,
     })),

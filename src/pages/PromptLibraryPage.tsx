@@ -1,5 +1,6 @@
 import { Bot, BookOpenText, Clipboard, Download, FileText, Plus, Search, Trash2, Upload, X } from 'lucide-react'
 import React from 'react'
+import { AgentStudio } from '../components/AgentStudio'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api'
 import { readPromptMarkdownFile } from '../lib/promptLibrary'
@@ -34,6 +35,12 @@ function errorMessage(error: unknown) {
 }
 
 export function PromptLibraryPage({ kind }: { kind: Kind }) {
+  return kind === 'agent'
+    ? <AgentStudio renderPromptLibrary={onBuild => <PromptLibraryContent kind="agent" onBuild={onBuild} />} />
+    : <PromptLibraryContent kind="skill" />
+}
+
+function PromptLibraryContent({ kind, onBuild }: { kind: Kind; onBuild?: () => void }) {
   const label = kind === 'skill' ? 'Skill' : 'Agent'
   const Icon = kind === 'skill' ? BookOpenText : Bot
   const [items, setItems] = useState<PromptSummary[]>([])
@@ -190,9 +197,11 @@ export function PromptLibraryPage({ kind }: { kind: Kind }) {
     <header className="flex flex-wrap items-start justify-between gap-4">
       <div className="flex items-start gap-3">
         <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-700"><Icon className="h-5 w-5" aria-hidden="true" /></span>
-        <div><h1 className="text-2xl font-semibold text-slate-900">智能 {label} 库</h1><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">保存可直接复制或下载的 Markdown 提示词。这里的文档不会自动成为平台可执行能力。</p></div>
+        <div><h1 className="text-2xl font-semibold text-slate-900">智能 {label} 库</h1><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">{kind === 'agent' ? '创建模块化 Agent，配置模型、Skill 和处理步骤；也可管理 Markdown 提示词模板。' : '保存可直接复制或下载的 Markdown 提示词。这里的文档不会自动成为平台可执行能力。'}</p></div>
       </div>
-      <button type="button" onClick={startCreate} className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"><Plus className="h-4 w-4" aria-hidden="true" />创建 {label}</button>
+      <div className="flex flex-wrap gap-2">{kind === 'agent' && <button type="button" onClick={startCreate} className="min-h-11 rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">创建提示词</button>}
+      <button type="button" onClick={kind === 'agent' ? onBuild : startCreate} className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"><Plus className="h-4 w-4" aria-hidden="true" />创建 {label}</button>
+      </div>
     </header>
 
     {notice && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}

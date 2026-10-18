@@ -456,7 +456,9 @@ class MySqlAiConfigurationRepository implements AiConfigurationRepository {
   async listCapabilitySettings() {
     return mapped('aiConfiguration.listCapabilitySettings', async () => {
       const [capabilities, bindings, projectRows] = await Promise.all([
-        this.executor.select().from(aiCapabilities).where(ne(aiCapabilities.source, 'deleted'))
+        this.executor.select().from(aiCapabilities).where(and(
+          ne(aiCapabilities.source, 'deleted'), ne(aiCapabilities.source, 'agent-builder'),
+        ))
           .orderBy(asc(aiCapabilities.kind), asc(aiCapabilities.name)),
         this.executor.select().from(aiCapabilityBindings)
           .orderBy(asc(aiCapabilityBindings.scopeType), asc(aiCapabilityBindings.scopeKey)),
@@ -469,7 +471,8 @@ class MySqlAiConfigurationRepository implements AiConfigurationRepository {
   async findCapability(capabilityId: string) {
     return mapped('aiConfiguration.findCapability', async () => {
       const [record] = await this.executor.select().from(aiCapabilities)
-        .where(and(eq(aiCapabilities.id, capabilityId), ne(aiCapabilities.source, 'deleted'))).limit(1)
+        .where(and(eq(aiCapabilities.id, capabilityId), ne(aiCapabilities.source, 'deleted'),
+          ne(aiCapabilities.source, 'agent-builder'))).limit(1)
       return record ?? null
     })
   }
@@ -491,6 +494,9 @@ class MySqlAiConfigurationRepository implements AiConfigurationRepository {
         eq(aiCapabilities.kind, input.record.kind), eq(aiCapabilities.capabilityKey, input.record.capabilityKey),
       )).limit(1).for('update')
 
+      if (existing?.source === 'agent-builder') {
+        throw Object.assign(new Error('个人 Agent 模板不能通过公共能力导入覆盖'), { status: 409, code: 'CAPABILITY_KEY_RESERVED' })
+      }
       if (existing) {
         await tx.insert(adminConfigurationRevisions).values(configurationRevisionValues({
           domain: 'capability', resourceType: 'capability', resourceId: existing.id,
@@ -670,6 +676,7 @@ class MySqlAiConfigurationRepository implements AiConfigurationRepository {
       const [capabilities, bindings] = await Promise.all([
         this.executor.select().from(aiCapabilities).where(and(
           eq(aiCapabilities.enabled, true), ne(aiCapabilities.source, 'deleted'),
+          ne(aiCapabilities.source, 'agent-builder'),
         ))
           .orderBy(asc(aiCapabilities.kind), asc(aiCapabilities.name)),
         this.executor.select().from(aiCapabilityBindings).where(eq(aiCapabilityBindings.enabled, true)),

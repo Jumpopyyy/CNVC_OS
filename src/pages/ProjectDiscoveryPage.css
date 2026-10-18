@@ -140,7 +140,7 @@
 .project-discovery-card-save button { min-height: 32px; padding: 0 10px; border: 1px solid #c9d8ee; border-radius: 7px; background: #fff; color: #536075; font-size: 11px; font-weight: 600; cursor: pointer; }
 .project-discovery-card-save button:last-child { border-color: #326bc2; background: #326bc2; color: #fff; }
 .project-discovery-card-save button:disabled { cursor: wait; opacity: .55; }
-.project-discovery-card-actions { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid #e0e6ee; }
+.project-discovery-card-actions { display: grid; grid-template-columns: auto 1fr auto auto auto; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid #e0e6ee; }
 .project-discovery-card-links { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
 .project-discovery-card-actions button { display: flex; height: 38px; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid #c9d8ee; border-radius: 8px; outline: none; background: #fff; color: #315f9e; font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer; }
 .project-discovery-news-link { display: inline-flex; min-height: 38px; align-items: center; gap: 4px; color: #315f9e; font-size: 11px; font-weight: 600; text-decoration: none; }
