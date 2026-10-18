@@ -6,7 +6,7 @@ export const DUE_DILIGENCE_SCHEMA_VERSION = '0140_due_diligence_library_bindings
 
 /** Probe actual columns, not just the migration journal. No DDL or data writes. */
 export async function checkDueDiligenceSchema() {
-  return Promise.all([
+  const queries = [
     db.select({ id: dueDiligenceTranscriptionJobs.id }).from(dueDiligenceTranscriptionJobs).limit(1),
     db.select({ request: digitalTwins.clientRequestId, target: digitalTwins.learningTargetAt, avatar: digitalTwins.avatarKind }).from(digitalTwins).limit(1),
     db.select({ id: digitalTwinPrivateAssets.id }).from(digitalTwinPrivateAssets).limit(1),
@@ -29,5 +29,12 @@ export async function checkDueDiligenceSchema() {
     db.select({ id: digitalTwinBuildSessions.id }).from(digitalTwinBuildSessions).limit(1),
     db.select({ id: digitalTwinInquiries.id }).from(digitalTwinInquiries).limit(1),
     db.select({ id: digitalTwinProjectKnowledge.id }).from(digitalTwinProjectKnowledge).limit(1),
-  ].map(query => query.then(() => true).catch(() => false)))
+  ]
+  // A diagnostic must not exhaust a small/shared connection pool and then
+  // misreport queue saturation as missing schema. Keep its load to one query.
+  const checks: boolean[] = []
+  for (const query of queries) {
+    try { await query; checks.push(true) } catch { checks.push(false) }
+  }
+  return checks
 }
