@@ -4,10 +4,11 @@ import { Button, Modal } from '../ui'
 import { apiPost } from '../../lib/api'
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition'
 import { TwinAvatar } from './TwinAvatar'
+import type { LibrarySnapshot } from '../../../server/src/contracts/dueDiligenceLibrary'
 import { createTwinConversationGate, inputAfterTwinReply } from './twinConversationState'
 
 export type TwinDialogueTarget = { id: string; twinId: string; name: string; public: boolean; avatarKind?: 'preset' | 'upload'; avatarPreset?: string | null; learningTwinId?: string }
-type Dialogue = { conversationId: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; metadata?: { auditId?: string; citations?: Array<{ sourceId: string; fileId?: string; title: string; version: number }> } }>; snapshot: { twinName: string; twinVersion: number; skills: Array<{ id: string; name: string; version: number }> } }
+type Dialogue = { conversationId: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; metadata?: { auditId?: string; citations?: Array<{ sourceId: string; fileId?: string; title: string; version: number }> } }>; snapshot: { twinName: string; twinVersion: number; skills: Array<{ id: string; name: string; version: number }>; library?: LibrarySnapshot[]; libraryWarnings?: string[] } }
 
 export function TwinDialogue({ target, projects = [], onClose, onLearned }: { target: TwinDialogueTarget; projects?: Array<{id:string;name:string}>; onClose: () => void; onLearned: () => Promise<void> }) {
   const [mode, setMode] = useState<'advice'|'project'>('advice'); const [projectId, setProjectId] = useState('')
@@ -17,6 +18,8 @@ export function TwinDialogue({ target, projects = [], onClose, onLearned }: { ta
   const [interimText, setInterimText] = useState('')
   const [pendingAction, setPendingAction] = useState<{ message: string; label: string; run: () => void } | null>(null)
   const requests = useRef(createTwinConversationGate()).current
+  const replyController = useRef<AbortController | null>(null)
+  useEffect(() => () => replyController.current?.abort(), [])
   const changingContext = useRef(false)
   const questionRef = useRef(question); questionRef.current = question
   const speech = useSpeechRecognition({ continuous: true, onInterim: setInterimText, onFinal: text => { questionRef.current = `${questionRef.current}${questionRef.current ? '\n' : ''}${text}`; setQuestion(questionRef.current) } })
@@ -33,16 +36,17 @@ export function TwinDialogue({ target, projects = [], onClose, onLearned }: { ta
     if (busy || loading || pendingAction || changingContext.current || !(questionRef.current.trim() || interimText.trim()) || (mode === 'project' && !projectId)) return
     const ticket = requests.beginWrite(); if (ticket === null) return
     setBusy(true); setError(''); setNotice('')
+    const controller = new AbortController(); replyController.current = controller
     try {
       await speech.pause()
       if (!requests.isCurrent(ticket)) return
       const submittedText = questionRef.current
       if (!submittedText.trim()) return
-      const result = await apiPost<Dialogue>(`${path}/messages`, { message: submittedText, useSkills, mode, projectId: mode === 'project' ? projectId : undefined })
-      if (!requests.isCurrent(ticket)) return
+      const result = await apiPost<Dialogue>(`${path}/messages`, { message: submittedText, useSkills, mode, projectId: mode === 'project' ? projectId : undefined }, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(240000)]) })
+      if (!requests.isCurrent(ticket) || controller.signal.aborted) return
       setData(result); questionRef.current = inputAfterTwinReply(questionRef.current, submittedText); setQuestion(questionRef.current); setFeedback('')
-    } catch (err) { if (requests.isCurrent(ticket)) setError((err as Error).message) }
-    finally { if (requests.finishWrite(ticket)) setBusy(false) }
+    } catch (err) { if (requests.isCurrent(ticket)) setError(controller.signal.aborted ? '已停止本次回复，未发送内容已保留。' : (err as Error).message) }
+    finally { if (replyController.current === controller) replyController.current = null; if (requests.finishWrite(ticket)) setBusy(false) }
   }
   const respond = async (decision: '采纳' | '修改' | '拒绝') => {
     if (!target.learningTwinId || !data || busy || pendingAction || changingContext.current) return
@@ -68,7 +72,7 @@ export function TwinDialogue({ target, projects = [], onClose, onLearned }: { ta
   const close = async () => {
     if (pendingAction || changingContext.current) return
     await speech.pause()
-    const complete = () => { requests.invalidate(); speech.reset(); onClose() }
+    const complete = () => { replyController.current?.abort(); requests.invalidate(); speech.reset(); onClose() }
     if (requests.isWriting() || questionRef.current.trim() || feedback.trim()) setPendingAction({ message: '还有未发送的内容或正在处理的请求。关闭后未发送内容不会保存；已保存的对话可重新打开查看。', label: '放弃并关闭', run: complete })
     else complete()
   }
@@ -80,6 +84,9 @@ export function TwinDialogue({ target, projects = [], onClose, onLearned }: { ta
     {mode === 'project' && <label className="block"><span className="label">选择询问的项目</span><select className="input" value={projectId} disabled={busy} onChange={event => { const next = event.target.value; void changeContext(() => setProjectId(next)) }}><option value="">请选择项目</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select><p className="mt-2 text-xs text-slate-500">依据该员工已确认的核查、纪要和正式提交材料回答，并展示来源；缺失内容会提醒员工补充。</p></label>}
     {!target.public && mode === 'advice' && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={useSkills} disabled={busy} onChange={event => { const next = event.target.checked; void changeContext(() => setUseSkills(next)) }} />自动使用已启用且适用的 Skill</label>}
     {loading && <p role="status" className="text-sm text-slate-500">加载对话中…</p>}
+    {busy && <Button size="sm" variant="secondary" onClick={() => replyController.current?.abort()}>停止本次回复</Button>}
+    {data?.snapshot.library?.length ? <p className="text-xs text-brand-700">本次公共能力：{data.snapshot.library.map(item => `${item.name} v${item.version}`).join('、')}</p> : null}
+    {data?.snapshot.libraryWarnings?.length ? <p role="status" className="text-xs text-amber-800">{data.snapshot.libraryWarnings.join('；')}</p> : null}
     <div className="max-h-96 space-y-3 overflow-y-auto" aria-live="polite">{data?.messages.map(message => <div key={message.id} className={`rounded-lg p-3 ${message.role === 'user' ? 'ml-5 bg-brand-50' : 'mr-5 bg-slate-50'}`}><p className="mb-1 text-xs text-slate-500">{message.role === 'user' ? '我' : target.name}</p><p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>{message.role === 'assistant' && message.metadata?.citations?.filter(item => item.fileId).map(item => <a key={item.sourceId} className="mt-2 block text-xs text-brand-700 underline" href={`/api/projects/files/${item.fileId}/versions/${item.version}/download`} target="_blank" rel="noreferrer">查看原材料：{item.title}</a>)}</div>)}</div>
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     <label className="block"><span className="label">继续对话</span><textarea className="textarea min-h-24" value={question} onChange={event => { questionRef.current = event.target.value; setQuestion(event.target.value) }} placeholder="输入希望分身协助核验的问题…" /></label>

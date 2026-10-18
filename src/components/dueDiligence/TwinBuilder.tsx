@@ -8,6 +8,8 @@ import type { TwinBuildProposal, TwinBuildUpload, TwinDraft } from './types'
 import { stageTwinAsset } from './twinDraftState'
 import type { TwinBuilderDraft } from './twinDraftRecovery'
 import { createTwinConversationGate, inputAfterTwinReply } from './twinConversationState'
+import { LibraryPicker } from './LibraryPicker'
+import type { LibrarySelection, LibrarySnapshot } from '../../../server/src/contracts/dueDiligenceLibrary'
 
 type BuildMessage = { id: string; role: string; content: string; metadata?: { twinBuildProposal?: TwinBuildProposal } }
 export function TwinBuilder({ draft, onDraft, onUpload, draftId, upload, preview = false, onBusyChange, onUploadAdopted, onPendingChange, initialState, onDraftState }: { draft: TwinDraft; draftId: string; onDraft: (draft: TwinDraft) => void; onUpload: (file: File) => Promise<string | null>; upload?: TwinBuildUpload; preview?: boolean; onBusyChange?: (busy: boolean) => void; onUploadAdopted?: () => void; onPendingChange?: (editor: string, pending: boolean) => void; initialState?: TwinBuilderDraft; onDraftState?: (state: TwinBuilderDraft) => void }) {
@@ -18,11 +20,15 @@ export function TwinBuilder({ draft, onDraft, onUpload, draftId, upload, preview
   const [messages, setMessages] = useState<BuildMessage[]>([]); const [proposal, setProposal] = useState<TwinBuildProposal | null>(initialState?.proposal || null)
   const proposalRef = useRef(proposal); proposalRef.current = proposal
   const [busy, setBusy] = useState(''); const [error, setError] = useState(''); const [notice, setNotice] = useState('')
+  const [librarySelection, setLibrarySelection] = useState<LibrarySelection>(initialState?.librarySelection || { skills: [], agent: null })
+  const [librarySnapshot, setLibrarySnapshot] = useState<LibrarySnapshot[]>([])
+  const replyController = useRef<AbortController | null>(null)
+  useEffect(() => () => replyController.current?.abort(), [])
   const requests = useRef(createTwinConversationGate()).current
   const [loadingHistory, setLoadingHistory] = useState(!preview)
   const [interim, setInterim] = useState('')
   const [proposalAsset, setProposalAsset] = useState<TwinBuildUpload | null>(initialState?.proposalAsset || null)
-  useEffect(() => { onDraftState?.({ message: [message, interim].filter(Boolean).join('\n'), proposal, proposalAsset }) }, [message, interim, proposal, proposalAsset, onDraftState])
+  useEffect(() => { onDraftState?.({ message: [message, interim].filter(Boolean).join('\n'), proposal, proposalAsset, librarySelection }) }, [message, interim, proposal, proposalAsset, librarySelection, onDraftState])
   const pendingEdit = Boolean(message.trim() || interim.trim() || proposal || busy || upload?.status === 'parsing')
   useEffect(() => { onPendingChange?.('builder', pendingEdit) }, [pendingEdit, onPendingChange])
   useEffect(() => () => onPendingChange?.('builder', false), [onPendingChange])
@@ -51,19 +57,20 @@ export function TwinBuilder({ draft, onDraft, onUpload, draftId, upload, preview
     if (busy || loadingHistory || upload?.status === 'parsing') return
     const ticket = requests.beginWrite(); if (ticket === null) return
     setBusy('chat'); setError(''); setNotice('')
+    const controller = new AbortController(); replyController.current = controller
     try {
       await speech.pause()
       if (!alive.current || !requests.isCurrent(ticket)) return
       const text = chosenText ?? messageRef.current
       if (!text.trim()) return
       const currentDraft = draftRef.current, currentProposal = proposalRef.current
-      const data = await apiPost<{messages:BuildMessage[];proposal:TwinBuildProposal}>('/due-diligence/twins/builder', { twinId: currentDraft.id || undefined, draftId, draft: currentProposal ? { ...currentDraft, rules: currentProposal.rules, cases: currentProposal.cases } : currentDraft, message: text })
-      if (!alive.current || !requests.isCurrent(ticket)) return
-      setMessages(data.messages); setProposal(data.proposal)
+      const data = await apiPost<{messages:BuildMessage[];proposal:TwinBuildProposal;librarySnapshot?:LibrarySnapshot[];warnings?:string[]}>('/due-diligence/twins/builder', { twinId: currentDraft.id || undefined, draftId, draft: currentProposal ? { ...currentDraft, rules: currentProposal.rules, cases: currentProposal.cases } : currentDraft, message: text, librarySelection }, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(240000)]) })
+      if (!alive.current || !requests.isCurrent(ticket) || controller.signal.aborted) return
+      setMessages(data.messages); setProposal(data.proposal); setLibrarySnapshot(data.librarySnapshot || []); setNotice(data.warnings?.join('；') || '')
       messageRef.current = inputAfterTwinReply(messageRef.current, chosenText === undefined ? text : null)
       setMessage(messageRef.current)
-    } catch (err) { if (alive.current && requests.isCurrent(ticket)) setError((err as Error).message) }
-    finally { if (requests.finishWrite(ticket) && alive.current) setBusy('') }
+    } catch (err) { if (alive.current && requests.isCurrent(ticket)) setError(controller.signal.aborted ? '已取消整理，输入和原有草稿已保留。' : (err as Error).message) }
+    finally { if (replyController.current === controller) replyController.current = null; if (requests.finishWrite(ticket) && alive.current) setBusy('') }
   }
   const applyTemplate = (ids: string[], avatar?: string) => {
     const rules = replaceTwinFocusRules(draft.rules, ids)
@@ -71,6 +78,9 @@ export function TwinBuilder({ draft, onDraft, onUpload, draftId, upload, preview
     setNotice(customRules.trim() ? '已更新模板选项，手写偏好保持不变；请检查是否有冲突后保存。' : '已填入偏好草稿，可继续对话完善或直接保存。')
   }
   return <div className="space-y-4">
+    {!preview && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-sm text-slate-700">参考平台方法与智能体（可选）</summary><div className="mt-3"><LibraryPicker task="builder" value={librarySelection} onChange={setLibrarySelection} disabled={Boolean(busy)} /></div></details>}
+    {librarySnapshot.length > 0 && <p className="text-xs text-brand-700">本次参考：{librarySnapshot.map(item => `${item.name} v${item.version}`).join('、')}；请核对建议后采纳。</p>}
+    {busy === 'chat' && <Button variant="secondary" size="sm" onClick={() => replyController.current?.abort()}>取消本次整理</Button>}
     <div><span className="label">选择起点</span><div className="grid gap-2 sm:grid-cols-3">{twinTemplates.map(template => <button type="button" key={template.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition-colors hover:border-brand-400 focus-visible:ring-2 focus-visible:ring-brand-500" disabled={Boolean(busy)} onClick={() => applyTemplate([...template.focusIds], template.avatar)}><strong className="text-sm">{template.name}</strong><p className="mt-1 text-xs leading-relaxed text-slate-500">{template.description}</p></button>)}</div><div className="mt-3 flex flex-wrap gap-2">{twinFocusOptions.map(option => <button type="button" key={option.id} aria-pressed={focusIds.includes(option.id)} className={`rounded-full border px-3 py-2 text-xs ${focusIds.includes(option.id) ? 'border-brand-400 bg-brand-50 text-brand-800' : 'border-slate-200 text-slate-600'}`} onClick={() => applyTemplate(focusIds.includes(option.id) ? focusIds.filter(id => id !== option.id) : [...focusIds, option.id])}>{option.label}</button>)}</div></div>
     <div className="rounded-xl border border-slate-200 bg-white p-4"><div className="mb-3 flex items-center gap-2"><Sparkles className="h-4 w-4 text-brand-600" /><h3 className="text-sm font-semibold">对话完善分身</h3></div>
       <div className="max-h-60 space-y-3 overflow-auto" aria-live="polite">{!messages.length && <p className="text-sm leading-relaxed text-slate-500">告诉我你最关注什么、习惯怎样核验。我会追问关键细节，整理成可确认的偏好建议。</p>}{messages.map(item => <div key={item.id} className={`rounded-lg p-3 text-sm whitespace-pre-wrap ${item.role === 'user' ? 'ml-6 bg-brand-50' : 'mr-6 bg-slate-50'}`}>{item.content}</div>)}</div>

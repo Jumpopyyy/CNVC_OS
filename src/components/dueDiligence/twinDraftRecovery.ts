@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import type { TwinBuildProposal, TwinBuildUpload, TwinDraft } from './types'
+import { LibrarySelectionSchema, type LibrarySelection } from '../../../server/src/contracts/dueDiligenceLibrary'
 
-export type TwinBuilderDraft = { message: string; proposal: TwinBuildProposal | null; proposalAsset: TwinBuildUpload | null }
+export type TwinBuilderDraft = { message: string; proposal: TwinBuildProposal | null; proposalAsset: TwinBuildUpload | null; librarySelection?: LibrarySelection }
 export const emptyTwinBuilderDraft = (): TwinBuilderDraft => ({ message: '', proposal: null, proposalAsset: null })
 export type TwinRecoveryContent = { draft: TwinDraft; draftId: string; builder: TwinBuilderDraft }
 export type TwinRecoveryRecord = { ownerId: string; revision: number; updatedAt: number; content: TwinRecoveryContent | null }
@@ -18,6 +19,7 @@ const contentSchema = z.object({
   }),
   builder: z.object({
     message: text,
+    librarySelection: LibrarySelectionSchema.optional(),
     proposal: z.object({ reply: text, description: text, rules: text, cases: text, followUps: z.array(z.object({ question: text, options: z.array(text).max(10) })).max(10) }).nullable(),
     proposalAsset: z.object({ name: text, assetId: z.uuid().optional(), status: z.enum(['parsing', 'ready', 'adopted', 'error']), traits: text.optional(), error: text.optional() }).nullable(),
   }),
