@@ -17,13 +17,14 @@ export function matchExpertFocus(expert: ChecklistExpert) {
     if (exact) { matched.add(exact.id); continue }
     const topics = line.replace(/^(?:重点关注|优先关注|关注|优先核验|重点核验|核验)\s*[:：]?\s*/, '').replace(/[。.]$/, '').split(/[、，,；;]/).map(value => value.trim()).filter(Boolean)
     for (const topic of topics) {
-      const option = twinFocusOptions.find(item => item.label === topic || focusAliases[item.id].includes(topic))
+      const option = twinFocusOptions.find(item => item.label === topic || focusAliases[item.id]?.includes(topic))
       // Never detach a positive keyword from a negation, condition or exception.
       if (!option) return { options: [], warning: `${expert.ownerName}分身含自定义判断或限制，标准模式未推断其含义，需智能分析。` }
       matched.add(option.id)
     }
   }
-  return { options: twinFocusOptions.filter(option => matched.has(option.id)), warning: lines.length ? '' : `${expert.ownerName}分身尚未设置公开关注点。` }
+  const selected = twinFocusOptions.filter(option => matched.has(option.id))
+  return { options: selected.filter(option => option.category !== '办公'), warning: selected.some(option => option.category === '办公') ? `${expert.ownerName}分身的办公协作偏好不直接转换为尽调问题，已略过这些关注点。` : lines.length ? '' : `${expert.ownerName}分身尚未设置公开关注点。` }
 }
 export function expertFocusQuestions(experts: ChecklistExpert[]): GeneratedQuestionDraft[] {
   return experts.flatMap(expert => {

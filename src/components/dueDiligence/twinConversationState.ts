@@ -25,3 +25,7 @@ export function createTwinConversationGate() {
 export function inputAfterTwinReply(currentText: string, submittedText: string | null) {
   return submittedText !== null && currentText === submittedText ? '' : currentText
 }
+
+export function isTwinProposalCurrent(base: string | undefined, rules: string, sourceRevision: string | null | undefined, revision: string | null) {
+  return base !== undefined && base === rules && sourceRevision !== undefined && sourceRevision === revision
+}

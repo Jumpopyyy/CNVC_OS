@@ -3,6 +3,7 @@
 export type RecordingRecovery = {
   scope: string; sessionId: string; epoch: number; nextSequence: number
   mimeType: string; seconds: number; lastSavedAt?: string; stopped: boolean; uploadIncomplete?: boolean; epochCounts?: Record<string, number>
+  uploadManifest?: import('../../../server/src/contracts/dueDiligenceCollaboration').RecordingUploadManifest
 }
 export type RecordingChunk = { key: string; scope: string; sessionId: string; epoch: number; sequence: number; blob: Blob }
 export type TranscriptRecovery = { scope: string; content: string; baseVersion: number | null; updatedAt: string }
@@ -60,4 +61,16 @@ export async function clearRecordingRecovery(scope: string) {
 export const saveTranscriptRecovery = (value: TranscriptRecovery) => transaction('drafts', 'readwrite', store => store.put(value))
 export const loadTranscriptRecovery = (scope: string) => transaction<TranscriptRecovery | undefined>('drafts', 'readonly', store => store.get(scope))
 export const clearTranscriptRecovery = (scope: string) => transaction('drafts', 'readwrite', store => store.delete(scope))
+// Distinct keys keep the richer workspace outbox compatible with v1 databases.
+// Order unmount writes before a newly mounted workspace reads the same draft.
+const workspaceOperations = new Map<string, Promise<unknown>>()
+function workspaceOperation<T>(scope: string, action: () => Promise<T>): Promise<T> {
+  const result = (workspaceOperations.get(scope) || Promise.resolve()).catch(() => {}).then(action)
+  workspaceOperations.set(scope, result)
+  void result.finally(() => { if (workspaceOperations.get(scope) === result) workspaceOperations.delete(scope) }).catch(() => {})
+  return result
+}
+export const loadInterviewWorkspaceDraft = (scope: string) => workspaceOperation(scope, () => transaction<import('./interviewWorkspaceDraft').InterviewWorkspaceDraft | undefined>('drafts', 'readonly', store => store.get(`workspace/${scope}`)))
+export const saveInterviewWorkspaceDraft = (value: import('./interviewWorkspaceDraft').InterviewWorkspaceDraft) => workspaceOperation(value.scope, () => transaction('drafts', 'readwrite', store => store.put({ ...value, scope: `workspace/${value.scope}` })))
+export const clearInterviewWorkspaceDraft = (scope: string) => workspaceOperation(scope, () => transaction('drafts', 'readwrite', store => store.delete(`workspace/${scope}`)))
 export const recordingChunkKey = (scope: string, sessionId: string, epoch: number, sequence: number) => `${scope}/${sessionId}/${String(epoch).padStart(5, '0')}/${String(sequence).padStart(8, '0')}`

@@ -127,7 +127,7 @@ export async function resolveDueDiligenceLibrary(input: { actor: AiCapabilityAct
     if (ref !== input.selection?.agent && item.kind !== 'skill' || ref === input.selection?.agent && item.kind !== 'agent') throw fail('能力类型不匹配', 400)
     if (!resources.some(existing => libraryKey(existing) === libraryKey(item))) resources.push(item)
   }
-  if (input.useSkills !== false) for (const ref of input.bindings ?? []) {
+  if (input.useSkills !== false && !input.selection?.replaceBindings) for (const ref of input.bindings ?? []) {
     if (!ref.enabled || !ref.tasks.includes(input.task) || input.selection?.agent && ['workflow', 'prompt-agent'].includes(ref.source)) continue
     if (resources.some(existing => libraryKey(existing) === libraryKey(ref))) continue
     try { resources.push(await loadLibraryReference(input.actor, ref, input.projectId, deps)) }

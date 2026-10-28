@@ -12,6 +12,8 @@ import { fetchAiGatewayChatCompatible } from './aiGatewayService.js'
 import { getDueDiligenceAsrCapability } from './dueDiligenceAsrService.js'
 import { createDueDiligenceRecordingStorage, RECORDING_LEASE_MS, recordingContainer, recordingError, splitTranscriptForSummary } from './dueDiligenceRecordingStorageService.js'
 import { nextInterviewSummaryStep, parseInterviewSummaryModelResult } from './dueDiligenceSummaryService.js'
+import { recordingLeaseActive } from '../contracts/dueDiligenceCollaboration.js'
+import { registerSummaryCancellation } from './dueDiligenceSummaryCancellation.js'
 
 export const DUE_DILIGENCE_WORKER_ID = 'due-diligence-artifact-worker'
 type Session = typeof dueDiligenceRecordingSessions.$inferSelect
@@ -28,7 +30,7 @@ export async function requireInterviewWorkspace(userId: string, projectId: strin
 
 export function publicRecordingSession(row: Session) {
   const { clientRequestId: _request, activeKey: _activeKey, archiveRunToken: _token, archiveLeaseExpiresAt: _archiveLease, epochs, ...rest } = row
-  return { ...rest, epoch: row.currentEpoch, durationKnown: row.source === 'browser', epochs: epochs.map(epoch => ({ ...epoch })), checkpointSeconds: 30, chunkMaxBytes: 2 * 1024 * 1024, maxDurationSeconds: 8 * 60 * 60 }
+  return { ...rest, epoch: row.currentEpoch, leaseActive: recordingLeaseActive(row), uploadManifest: epochs[0]?.uploadManifest, durationKnown: row.source === 'browser', epochs: epochs.map(epoch => ({ ...epoch })), checkpointSeconds: 30, chunkMaxBytes: 2 * 1024 * 1024, maxDurationSeconds: 8 * 60 * 60 }
 }
 export function publicSummaryTask(row: ArtifactTask) {
   const { sourceText: _source, actorRole: _role, chunkResults: _chunks, mergeState: _merge, runToken: _token, leaseExpiresAt: _lease, ...rest } = row
@@ -41,7 +43,7 @@ export async function currentRecordingSession(interviewId: string) {
 }
 export async function assertInterviewRecorder(userId: string, interviewId: string) {
   const session = await currentRecordingSession(interviewId)
-  if (session && session.ownerUserId !== userId && session.leaseExpiresAt && session.leaseExpiresAt.getTime() > Date.now()) {
+  if (session && session.ownerUserId !== userId && recordingLeaseActive(session)) {
     throw recordingError('INTERVIEW_RECORDER_REQUIRED', '访谈正在由另一位员工记录，您可只读查看并发送插问', 403)
   }
 }
@@ -95,15 +97,23 @@ export async function archiveInterviewText(input: { projectId: string; interview
   }
 }
 
-export async function enqueueInterviewSummary(projectId: string, interviewId: string, userId: string, role: string, transcriptVersion: number) {
+export async function enqueueInterviewSummary(projectId: string, interviewId: string, userId: string, role: string, transcriptVersion: number, regenerate = false) {
   await requireInterviewWorkspace(userId, projectId, interviewId)
-  const [transcript] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
-  if (!transcript?.content.trim()) throw recordingError('EMPTY_TRANSCRIPT', '请先保存访谈转写文字', 400)
-  if (transcript.version !== transcriptVersion) throw recordingError('TRANSCRIPT_VERSION_CONFLICT', '转写稿已更新，请保存后使用最新版本生成纪要')
-  const id = randomUUID(); const sourceHash = createHash('sha256').update(`${transcriptVersion}:${transcript.content}`).digest('hex')
-  await db.insert(dueDiligenceArtifactTasks).values({ id, projectId, interviewId, createdBy: userId, actorRole: role, kind: 'summary', status: 'queued', transcriptVersion, sourceHash, sourceText: transcript.content, totalChunks: splitTranscriptForSummary(transcript.content).length }).onDuplicateKeyUpdate({ set: { id: sql`${dueDiligenceArtifactTasks.id}` } })
-  const [task] = await db.select().from(dueDiligenceArtifactTasks).where(and(eq(dueDiligenceArtifactTasks.interviewId, interviewId), eq(dueDiligenceArtifactTasks.kind, 'summary'), eq(dueDiligenceArtifactTasks.sourceHash, sourceHash))).limit(1)
-  await wakeDueDiligenceArtifactWorker(); return publicSummaryTask(task)
+  const result = await db.transaction(async tx => {
+    await tx.select({ id: dueDiligenceInterviews.id }).from(dueDiligenceInterviews).where(eq(dueDiligenceInterviews.id, interviewId)).for('update')
+    const [transcript] = await tx.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).for('update')
+    if (!transcript?.content.trim()) throw recordingError('EMPTY_TRANSCRIPT', '请先保存访谈转写文字', 400)
+    if (transcript.version !== transcriptVersion) throw recordingError('TRANSCRIPT_VERSION_CONFLICT', '转写稿已更新，请保存后使用最新版本生成纪要')
+    const [previous] = await tx.select().from(dueDiligenceArtifactTasks).where(and(eq(dueDiligenceArtifactTasks.interviewId, interviewId), eq(dueDiligenceArtifactTasks.kind, 'summary'), eq(dueDiligenceArtifactTasks.transcriptVersion, transcriptVersion))).orderBy(sql`${dueDiligenceArtifactTasks.createdAt} DESC`).limit(1)
+    if (previous && (!regenerate || ['queued', 'processing'].includes(previous.status))) return publicSummaryTask(previous)
+    const id = randomUUID()
+    const sourceHash = createHash('sha256').update(`${transcriptVersion}:${transcript.content}${regenerate ? ':' + id : ''}`).digest('hex')
+    await tx.insert(dueDiligenceArtifactTasks).values({ id, projectId, interviewId, createdBy: userId, actorRole: role, kind: 'summary', status: 'queued', transcriptVersion, sourceHash, sourceText: transcript.content, totalChunks: splitTranscriptForSummary(transcript.content).length }).onDuplicateKeyUpdate({ set: { id: sql`${dueDiligenceArtifactTasks.id}` } })
+    const [task] = await tx.select().from(dueDiligenceArtifactTasks).where(and(eq(dueDiligenceArtifactTasks.interviewId, interviewId), eq(dueDiligenceArtifactTasks.kind, 'summary'), eq(dueDiligenceArtifactTasks.sourceHash, sourceHash))).limit(1)
+    return publicSummaryTask(task)
+  })
+  await wakeDueDiligenceArtifactWorker()
+  return result
 }
 
 async function processRecordingSession(session: Session, signal: AbortSignal) {
@@ -136,13 +146,18 @@ async function processSummaryTask(task: ArtifactTask, signal: AbortSignal) {
   const runToken = randomUUID()
   const [claimed] = await db.update(dueDiligenceArtifactTasks).set({ status: 'processing', runToken, leaseExpiresAt: new Date(Date.now() + 120_000), attempts: sql`${dueDiligenceArtifactTasks.attempts} + 1`, updatedAt: new Date() }).where(and(eq(dueDiligenceArtifactTasks.id, task.id), eq(dueDiligenceArtifactTasks.status, 'queued')))
   if (claimed.affectedRows !== 1) return
+  const cancellation = registerSummaryCancellation(task.id, runToken)
+  const taskSignal = AbortSignal.any([signal, cancellation.signal])
   try {
+  // The stop endpoint may have won just before controller registration.
+  const [fresh] = await db.select({ status: dueDiligenceArtifactTasks.status, runToken: dueDiligenceArtifactTasks.runToken }).from(dueDiligenceArtifactTasks).where(eq(dueDiligenceArtifactTasks.id, task.id)).limit(1)
+  if (fresh?.status !== 'processing' || fresh.runToken !== runToken) return
     await requireInterviewWorkspace(task.createdBy, task.projectId, task.interviewId)
+    const questions = await db.select({ id: dueDiligenceQuestions.id, title: dueDiligenceQuestions.title }).from(dueDiligenceQuestions).where(and(eq(dueDiligenceQuestions.projectId, task.projectId), isNull(dueDiligenceQuestions.deletedAt))).limit(60)
     const [actor] = await db.select({ role: users.role, status: users.status }).from(users).where(eq(users.id, task.createdBy)).limit(1)
     if (!actor || actor.status !== '启用') throw recordingError('ACTOR_UNAVAILABLE', '提交员工已停用，无法继续生成纪要', 403)
-    const questions = await db.select({ id: dueDiligenceQuestions.id, title: dueDiligenceQuestions.title }).from(dueDiligenceQuestions).where(and(eq(dueDiligenceQuestions.projectId, task.projectId), isNull(dueDiligenceQuestions.deletedAt))).limit(60)
     const runtime = await resolveDueDiligenceModelRuntime(actor.role)
-    const step = await nextInterviewSummaryStep({ sourceText: task.sourceText, chunkResults: task.chunkResults, mergeState: task.mergeState, signal }, async (prompt, activeSignal) => {
+    const step = await nextInterviewSummaryStep({ sourceText: task.sourceText, chunkResults: task.chunkResults, mergeState: task.mergeState, signal: taskSignal }, async (prompt, activeSignal) => {
       const response = await fetchAiGatewayChatCompatible(runtime.baseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(runtime.apiKey ? { Authorization: `Bearer ${runtime.apiKey}` } : {}) }, body: JSON.stringify({ model: runtime.model, response_format: { type: 'json_object' }, max_tokens: 4500, messages: [{ role: 'system', content: '你是股权投资访谈整理助手。只依据提供的全文片段，输出JSON {"summary":"6000字以内纪要","suggestions":[{"questionId":"已有问题ID","suggestion":"待员工确认的核查结论建议","evidenceExcerpt":"本段转写中的逐字证据"}]}。可不提建议。建议必须来自已有问题，不编造访谈事实、音频时间戳或说话人。' }, { role: 'user', content: `现有核查问题：${JSON.stringify(questions)}\n\n${prompt}` }] }), signal: AbortSignal.any([activeSignal || signal, AbortSignal.timeout(90_000)]) }, fetch, 90_000)
       if (!response.ok) throw recordingError('MODEL_UNAVAILABLE', `纪要模型暂不可用（HTTP ${response.status}），已完成片段会保留`, 503)
       const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> }
@@ -151,6 +166,7 @@ async function processSummaryTask(task: ArtifactTask, signal: AbortSignal) {
       try { return parseInterviewSummaryModelResult(JSON.parse(content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''))) }
       catch { throw recordingError('MODEL_INVALID_OUTPUT', '模型未返回有效纪要格式，已完成片段会保留', 502) }
     })
+    await requireInterviewWorkspace(task.createdBy, task.projectId, task.interviewId)
     const suggestions = [...task.questionSuggestions]
     for (const suggestion of step.suggestions) {
       const question = questions.find(item => item.id === suggestion.questionId)
@@ -163,7 +179,7 @@ async function processSummaryTask(task: ArtifactTask, signal: AbortSignal) {
     await db.update(dueDiligenceArtifactTasks).set({ status: step.ready ? 'ready' : 'queued', completedChunks: step.chunkResults.length, chunkResults: step.chunkResults, mergeState: step.mergeState, summary: step.summary, questionSuggestions: suggestions, errorMessage: null, runToken: null, leaseExpiresAt: null, updatedAt: new Date() }).where(and(eq(dueDiligenceArtifactTasks.id, task.id), eq(dueDiligenceArtifactTasks.runToken, runToken)))
   } catch (error) {
     await db.update(dueDiligenceArtifactTasks).set({ status: 'failed', errorMessage: error instanceof Error ? error.message.slice(0, 1000) : '纪要生成失败', runToken: null, leaseExpiresAt: null, updatedAt: new Date() }).where(and(eq(dueDiligenceArtifactTasks.id, task.id), eq(dueDiligenceArtifactTasks.runToken, runToken)))
-  }
+  } finally { cancellation.release() }
 }
 
 /** Registered by the existing scheduler; never spins up a second queue or local AI. */

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { TwinBuildProposal, TwinBuildUpload, TwinDraft } from './types'
 import { LibrarySelectionSchema, type LibrarySelection } from '../../../server/src/contracts/dueDiligenceLibrary'
 
-export type TwinBuilderDraft = { message: string; proposal: TwinBuildProposal | null; proposalAsset: TwinBuildUpload | null; librarySelection?: LibrarySelection }
+export type TwinBuilderDraft = { message: string; proposal: TwinBuildProposal | null; proposalAsset: TwinBuildUpload | null; proposalBase?: string; proposalRevision?: string | null; librarySelection?: LibrarySelection; proposalOutdated?: boolean; editingMessage?: { messageId: string; content: string; expectedContent: string; expectedLastMessageId: string } }
 export const emptyTwinBuilderDraft = (): TwinBuilderDraft => ({ message: '', proposal: null, proposalAsset: null })
 export type TwinRecoveryContent = { draft: TwinDraft; draftId: string; builder: TwinBuilderDraft }
 export type TwinRecoveryRecord = { ownerId: string; revision: number; updatedAt: number; content: TwinRecoveryContent | null }
@@ -20,6 +20,10 @@ const contentSchema = z.object({
   builder: z.object({
     message: text,
     librarySelection: LibrarySelectionSchema.optional(),
+    proposalOutdated: z.boolean().optional(),
+    proposalBase: text.optional(),
+    proposalRevision: z.uuid().nullable().optional(),
+    editingMessage: z.object({ messageId: z.uuid(), content: z.string().max(8000), expectedContent: z.string().max(8000), expectedLastMessageId: z.uuid() }).optional(),
     proposal: z.object({ reply: text, description: text, rules: text, cases: text, followUps: z.array(z.object({ question: text, options: z.array(text).max(10) })).max(10) }).nullable(),
     proposalAsset: z.object({ name: text, assetId: z.uuid().optional(), status: z.enum(['parsing', 'ready', 'adopted', 'error']), traits: text.optional(), error: text.optional() }).nullable(),
   }),

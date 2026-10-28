@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { api, apiGet, apiPost } from '../../lib/api'
 import { clearRecordingRecovery, deleteRecordingChunk, loadRecordingRecovery, nextRecordingChunk, recordingChunkKey, saveRecordingCheckpoint, saveRecordingRecovery, type RecordingRecovery } from './recordingRecoveryStore'
 import { createRecordingChunkQueue } from './recordingChunkQueue'
+import { blobSha256 as sha256, inspectRecordingUpload } from './recordingUploadManifest'
+import { sameRecordingUpload, type RecordingUploadManifest } from '../../../server/src/contracts/dueDiligenceCollaboration'
 
-export type RecordingSession = { id: string; epoch: number; status: 'recording' | 'paused' | 'finalizing' | 'archived' | 'discarded' | 'failed'; durationSeconds: number; lastCheckpointAt?: string; ownerUserId: string; fileIds: string[]; mimeType: string; source?: string; errorMessage?: string | null }
+export type RecordingSession = { id: string; epoch: number; status: 'recording' | 'paused' | 'finalizing' | 'archived' | 'discarded' | 'failed'; durationSeconds: number; lastCheckpointAt?: string; ownerUserId: string; fileIds: string[]; mimeType: string; source?: string; errorMessage?: string | null; uploadManifest?: RecordingUploadManifest; leaseExpiresAt?: string; leaseActive?: boolean }
 export const RECORDING_CHUNK_BYTES = 2 * 1024 * 1024
 export const MAX_RECORDING_SECONDS = 8 * 60 * 60
 export const MAX_RECORDING_BYTES = 1024 * 1024 * 1024
 const reason = (error: unknown) => error instanceof Error ? error.message : '录音保存失败'
-const sha256 = async (blob: Blob) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())), value => value.toString(16).padStart(2, '0')).join('')
 
 export function useInterviewRecording(userId: string, projectId: string, interviewId: string) {
   const scope = `${userId}/${projectId}/${interviewId}`
@@ -19,6 +20,8 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
   const [error, setError] = useState('')
   const [checkpoint, setCheckpoint] = useState('')
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
+  const [uploadPhase, setUploadPhase] = useState('')
+  const uploadAbort = useRef<AbortController | null>(null)
   const recovery = useRef<RecordingRecovery | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
   const stream = useRef<MediaStream | null>(null)
@@ -44,6 +47,7 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
       while (chunk) {
         const result = await api<{ session: RecordingSession }>(`${base}/${chunk.sessionId}/epochs/${chunk.epoch}/chunks/${chunk.sequence}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/octet-stream', 'X-Chunk-Sha256': await sha256(chunk.blob) }, body: chunk.blob,
+          ...(uploadAbort.current ? {signal:AbortSignal.any([uploadAbort.current.signal,AbortSignal.timeout(120_000)])} : {}),
         })
         // A crash can persist a chunk before its session checkpoint. Reconcile
         // counts before deleting the local copy so finalization cannot omit it.
@@ -99,7 +103,7 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
     item.onerror = () => { if (mounted.current) { setError('浏览器录音异常，已保存片段仍可恢复。'); setState('recoverable') } stopTracks() }
     item.start(30_000); startedAt.current = Date.now(); setState('recording')
   }
-  const begin = async () => {
+  const begin = async (replaceExpiredSessionId?: string) => {
     if (loadingRecovery.current) throw new Error('正在检查历史录音，请稍后开始。')
     if (transition.current || recovery.current) return
     transition.current = true; setState('requesting'); setError('')
@@ -107,7 +111,7 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(value => MediaRecorder.isTypeSupported(value))
       if (!mimeType) throw new Error('当前浏览器不支持可归档的录音格式，请使用 Chrome 或 Safari。')
       const media = await navigator.mediaDevices.getUserMedia({ audio: true }); stream.current = media
-      const item = await apiPost<RecordingSession>(base, { clientRequestId: crypto.randomUUID(), mimeType, source: 'browser' })
+      const item = await apiPost<RecordingSession>(base, { clientRequestId: crypto.randomUUID(), mimeType, source: 'browser', replaceExpiredSessionId })
       recovery.current = { scope, sessionId: item.id, epoch: item.epoch, nextSequence: 0, mimeType, seconds: 0, stopped: false, epochCounts: { [item.epoch]: 0 } }
       pausedSeconds.current = 0; setSeconds(0); setSession(item); await persist(); await startMedia(media, mimeType)
     } catch (problem) { stopTracks(); setState(recovery.current ? 'recoverable' : 'idle'); setError(reason(problem)); throw problem }
@@ -122,7 +126,7 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
   }
   const resume = async () => {
     if (transition.current || !recovery.current) return
-    if (recovery.current.uploadIncomplete) throw new Error('文件尚未上传完整，请放弃此上传后重新选择原文件。')
+    if (recovery.current.uploadIncomplete) throw new Error('请重新选择原录音文件继续上传，已保存部分不会重复上传。')
     if (currentSeconds() >= MAX_RECORDING_SECONDS) throw new Error('已达到单场 8 小时上限，请结束并保存。')
     transition.current = true
     try {
@@ -184,26 +188,49 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
   }
   const upload = async (file: File) => {
     if (loadingRecovery.current) throw new Error('正在检查历史录音，请稍后上传。')
-    if (transition.current || recovery.current) throw new Error('请先结束或放弃当前录音。')
+    if (transition.current || recovery.current && !recovery.current.uploadManifest) throw new Error('请先结束或放弃当前录音。')
     if (!file.size || file.size > MAX_RECORDING_BYTES) throw new Error('录音文件应小于 1 GB。')
-    transition.current = true; setUploadProgress(0)
+    transition.current = true; setUploadProgress(0); setUploadPhase('校验文件'); setError('')
+    const controller = new AbortController(); uploadAbort.current = controller
     try {
+      const {manifest, hashes} = await inspectRecordingUpload(file, RECORDING_CHUNK_BYTES, controller.signal, setUploadProgress)
+      if (recovery.current?.uploadManifest && !sameRecordingUpload(recovery.current.uploadManifest, manifest)) throw new Error('选择的文件与未完成上传不一致，请选择原文件，或明确放弃后开始新的上传。')
+      await drainLocal(); await flush()
       const mimeType = ({mp3:'audio/mpeg',wav:'audio/wav',m4a:'audio/mp4',webm:'audio/webm'} as Record<string,string>)[file.name.split('.').at(-1)?.toLowerCase() || ''] || file.type
-      const item = await apiPost<RecordingSession>(base, { clientRequestId: crypto.randomUUID(), mimeType, fileName: file.name, source: 'upload' })
-      recovery.current = { scope, sessionId: item.id, epoch: item.epoch, nextSequence: 0, mimeType, seconds: 0, stopped: true, uploadIncomplete: true }
+      const item = recovery.current
+        ? (await apiGet<{session:RecordingSession}>(`${base}/${recovery.current.sessionId}`)).session
+        : await apiPost<RecordingSession>(base, { clientRequestId: crypto.randomUUID(), mimeType, fileName: file.name, source: 'upload', uploadManifest:manifest })
+      if (['archived','finalizing'].includes(item.status)) {await clearRecordingRecovery(scope);recovery.current=null;setSession(item);setState('idle');return item}
+      if (item.status === 'discarded') throw new Error('原上传已放弃，请刷新后开始新的上传。')
+      recovery.current = { scope, sessionId: item.id, epoch: item.epoch, nextSequence: 0, mimeType, seconds: 0, stopped: true, uploadIncomplete: true, uploadManifest:manifest,epochCounts:recovery.current?.epochCounts || {} }
       pausedSeconds.current = 0; await persist(); setSession(item)
+      const saved = await apiGet<{chunks:Array<{epoch:number;sequence:number;sha256:string}>}>(`${base}/${item.id}`)
+      const existing = new Map(saved.chunks.map(chunk => [chunk.sequence,chunk.sha256]))
+      setUploadPhase('上传');setUploadProgress(0)
       for (let offset = 0; offset < file.size; offset += RECORDING_CHUNK_BYTES) {
-        queueBlob(file.slice(offset, offset + RECORDING_CHUNK_BYTES)); await localWrites.current; await flush()
+        controller.signal.throwIfAborted()
+        const sequence = offset / RECORDING_CHUNK_BYTES
+        if (existing.has(sequence) && existing.get(sequence) !== hashes[sequence]) throw new Error('已保存的分片与原文件不一致，已暂停上传。')
+        if (!existing.has(sequence)) {
+          recovery.current.nextSequence=sequence
+          recovery.current.epochCounts={[item.epoch]:sequence}
+          queueBlob(file.slice(offset, offset + RECORDING_CHUNK_BYTES)); await localWrites.current; await flush()
+        }
+        recovery.current.nextSequence=sequence+1;recovery.current.epochCounts={[item.epoch]:sequence+1}
         setUploadProgress(Math.min(100, Math.round((offset + RECORDING_CHUNK_BYTES) / file.size * 100)))
       }
+      controller.signal.throwIfAborted()
+      await flush()
       recovery.current.uploadIncomplete = false; await persist()
       const result = await apiPost<RecordingSession>(`${base}/${item.id}/finalize`, { durationSeconds: 0, expectedChunks: Object.entries(recovery.current.epochCounts || {}).map(([epoch,count]) => ({epoch:Number(epoch),count})) })
-      await clearRecordingRecovery(scope); recovery.current = null; setSession(result); return result
+      await clearRecordingRecovery(scope); recovery.current = null; setSession(result); setState('idle'); return result
     } catch (problem) {
       // A partial file is not a complete recording. Keep a recoverable marker,
       // but require re-selection instead of offering to finalize a truncated file.
-      setError(`${reason(problem)}。上传未完成，请放弃此未完成上传后重新选择原文件。`); setState('recoverable'); throw problem
-    } finally { transition.current = false; setUploadProgress(null) }
+      setState(recovery.current ? 'recoverable' : 'idle')
+      if (controller.signal.aborted) {setError('上传已暂停。已保存分片保留，重新选择原文件可继续。');return null}
+      setError(`${reason(problem)} 已保存分片保留，可重新选择原文件继续上传。`); throw problem
+    } finally { transition.current = false; uploadAbort.current=null;setUploadProgress(null);setUploadPhase('') }
   }
   useEffect(() => {
     mounted.current = true
@@ -215,7 +242,7 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
         const data = await apiGet<{list:RecordingSession[]}>(base)
         const own = data.list.find(item => item.ownerUserId === userId && ['recording','paused','failed','finalizing'].includes(item.status))
         if (!own || !live) return
-        value = {scope,sessionId:own.id,epoch:own.epoch,nextSequence:0,mimeType:own.mimeType,seconds:own.durationSeconds,stopped:true,uploadIncomplete:own.source === 'upload' && own.status !== 'failed',epochCounts:{}}
+        value = {scope,sessionId:own.id,epoch:own.epoch,nextSequence:0,mimeType:own.mimeType,seconds:own.durationSeconds,stopped:true,uploadIncomplete:own.source === 'upload' && own.status !== 'failed',uploadManifest:own.uploadManifest,epochCounts:{}}
       }
       const result = await apiGet<{ session: RecordingSession; chunks: Array<{epoch:number;sequence:number}> }>(`${base}/${value.sessionId}`)
       if (!live) return
@@ -223,9 +250,10 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
       for (let epoch=0; epoch<=result.session.epoch; epoch++) value.epochCounts = {...value.epochCounts,[epoch]:value.epochCounts?.[epoch] || 0}
       for (const chunk of result.chunks) value.epochCounts = {...value.epochCounts,[chunk.epoch]:Math.max(value.epochCounts?.[chunk.epoch] || 0,chunk.sequence + 1)}
       value.nextSequence = Math.max(value.nextSequence, value.epochCounts?.[value.epoch] || 0)
+      value.uploadManifest ??= result.session.uploadManifest
       recovery.current = value; pausedSeconds.current = value.seconds; setSeconds(value.seconds); setSession(result.session); setState('recoverable')
     }).catch(problem => { if (live) setError(reason(problem)) }).finally(() => { if (live) loadingRecovery.current = false })
-    return () => { live = false; mounted.current = false; if (recorder.current?.state === 'recording') pausedSeconds.current = currentSeconds(); startedAt.current = 0; const current = recorder.current; if (current && current.state !== 'inactive') current.stop(); stopTracks() }
+    return () => { live = false; mounted.current = false; uploadAbort.current?.abort();if (recorder.current?.state === 'recording') pausedSeconds.current = currentSeconds(); startedAt.current = 0; const current = recorder.current; if (current && current.state !== 'inactive') current.stop(); stopTracks() }
   }, [scope]) // The workspace is keyed by user/project/interview.
   useEffect(() => {
     if (!session || session.status !== 'finalizing') return
@@ -251,5 +279,5 @@ export function useInterviewRecording(userId: string, projectId: string, intervi
     }, 30_000)
     return () => clearInterval(timer)
   }, [state, base])
-  return { state, session, seconds, error, checkpoint, uploadProgress, begin, pause, resume, finish, discard, upload, retry }
+  return { state, session, seconds, error, checkpoint, uploadProgress, uploadPhase, uploadIncomplete:Boolean(recovery.current?.uploadIncomplete), cancelUpload:()=>uploadAbort.current?.abort(), begin, pause, resume, finish, discard, upload, retry }
 }

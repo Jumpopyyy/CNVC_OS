@@ -5,6 +5,9 @@ export type AsrCapability = {
   configured: boolean
   provider: string | null
   model: string | null
+  warning?: string
+  maxAudioBytes?: number
+  maxDurationSeconds?: number | null
 }
 
 export function getDueDiligenceAsrCapability(env: NodeJS.ProcessEnv = process.env): AsrCapability {
@@ -20,6 +23,8 @@ export function getDueDiligenceAsrCapability(env: NodeJS.ProcessEnv = process.en
     configured: Boolean(baseUrl && provider && apiKey && model),
     provider,
     model: model || null,
+    maxAudioBytes: dueDiligenceAsrMaxBytes(env),
+    maxDurationSeconds: null,
   }
 }
 

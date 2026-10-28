@@ -1,0 +1,60 @@
+.dd-question-workspace {
+  container-type: inline-size;
+  container-name: dd-questions;
+}
+.dd-question-workspace .dd-question-row {
+  flex-wrap: wrap;
+}
+.dd-question-workspace .dd-question-actions {
+  flex-basis: 100%;
+  margin-left: auto;
+}
+@container dd-questions (min-width: 720px) {
+  .dd-question-workspace .dd-question-actions {
+    flex-basis: auto;
+  }
+}
+.dd-question-workspace .dd-question-filters > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dd-question-workspace .dd-question-filters > label > .label {
+  margin-bottom: 0;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.dd-question-workspace .dd-question-filters .input {
+  min-height: 36px;
+  height: 36px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.dd-question-workspace .dd-question-owner-filter [data-person-select] {
+  flex-direction: row;
+  align-items: center;
+  width: 220px;
+  gap: 6px;
+}
+.dd-question-workspace .dd-question-owner-filter [data-person-select] > input {
+  width: 104px;
+}
+.dd-question-workspace .dd-question-owner-filter [data-person-select] > select {
+  min-width: 0;
+  width: 110px;
+}
+@media (max-width: 480px) {
+  .dd-question-workspace .dd-question-filters > div:first-child {
+    flex-basis: 100%;
+  }
+  .dd-question-workspace .dd-question-owner-filter [data-person-select] {
+    width: 190px;
+  }
+  .dd-question-workspace .dd-question-owner-filter [data-person-select] > input {
+    width: 88px;
+  }
+  .dd-question-workspace .dd-question-owner-filter [data-person-select] > select {
+    width: 96px;
+  }
+}

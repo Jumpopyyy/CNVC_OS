@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { raw, Router } from 'express'
 import { z } from 'zod'
 import { db } from '../db/client.js'
@@ -8,6 +8,7 @@ import type { AuthedRequest } from '../middleware/requireAuth.js'
 import { projectFileAccessCondition, requireProjectFileUpload } from '../services/projectFileAccessService.js'
 import { archiveInterviewText, currentRecordingSession, enqueueInterviewSummary, leaseUntil, publicRecordingSession, publicSummaryTask, requireInterviewWorkspace, wakeDueDiligenceArtifactWorker } from '../services/dueDiligenceInterviewWorkflowService.js'
 import { createDueDiligenceRecordingStorage, RECORDING_CHUNK_MAX_BYTES, RECORDING_SESSION_MAX_BYTES, RECORDING_SESSION_MAX_SECONDS, recordingContainer, recordingError } from '../services/dueDiligenceRecordingStorageService.js'
+import { abortSummaryRequest } from '../services/dueDiligenceSummaryCancellation.js'
 
 const routeId = (value: string | string[]) => z.string().uuid().parse(value)
 const base = '/projects/:projectId/interviews/:id'
@@ -52,7 +53,7 @@ export function createDueDiligenceInterviewRouter(onSummaryConfirmed?: SummaryCo
   router.post(`${base}/recording-sessions`, async (req: AuthedRequest, res, next) => {
     try {
       const { projectId, interviewId } = await workspace(req); await requireProjectFileUpload(db, projectId, req.user!.uid)
-      const body = z.object({ clientRequestId: z.string().uuid(), mimeType: z.string().max(128), fileName: z.string().max(255).optional(), source: z.enum(['browser', 'upload']).default('browser') }).parse(req.body)
+      const body = z.object({ clientRequestId: z.string().uuid(), mimeType: z.string().max(128), fileName: z.string().max(255).optional(), source: z.enum(['browser', 'upload']).default('browser'), replaceExpiredSessionId: z.string().uuid().optional(), uploadManifest: z.object({name:z.string().max(255),size:z.number().int().positive().max(RECORDING_SESSION_MAX_BYTES),chunkBytes:z.literal(RECORDING_CHUNK_MAX_BYTES),fingerprint:z.string().regex(/^[a-f0-9]{64}$/)}).optional() }).parse(req.body)
       const container = recordingContainer(body.mimeType); const name = fileName(body.fileName, body.mimeType)
       const session = await db.transaction(async tx => {
         // Serialize recorder ownership using an existing parent row, not a process-local lock.
@@ -64,9 +65,11 @@ export function createDueDiligenceInterviewRouter(onSummaryConfirmed?: SummaryCo
         }
         const [active] = await tx.select().from(dueDiligenceRecordingSessions).where(eq(dueDiligenceRecordingSessions.activeKey, interviewId)).limit(1)
         if (active?.leaseExpiresAt && active.leaseExpiresAt.getTime() > Date.now()) throw recordingError('INTERVIEW_RECORDING_ACTIVE', '本访谈已有录音，请先继续、结束或放弃原录音')
+        if (active && active.ownerUserId !== req.user!.uid && body.replaceExpiredSessionId !== active.id) throw recordingError('RECORDING_TAKEOVER_REQUIRED', '原记录人已离线，请确认接续记录后开始。原录音保留。')
+        if (body.replaceExpiredSessionId && active?.id !== body.replaceExpiredSessionId) throw recordingError('RECORDING_SESSION_CONFLICT', '记录状态已变化，请刷新后核对')
         if (active) await tx.update(dueDiligenceRecordingSessions).set({ activeKey: null, status: 'paused', updatedAt: new Date() }).where(eq(dueDiligenceRecordingSessions.id, active.id))
         const id = randomUUID()
-        await tx.insert(dueDiligenceRecordingSessions).values({ id, projectId, interviewId, ownerUserId: req.user!.uid, clientRequestId: body.clientRequestId, activeKey: interviewId, mimeType: container.mimeType, fileName: name, source: body.source, epochs: [{ epoch: 0, mimeType: container.mimeType, fileName: name }], leaseExpiresAt: leaseUntil(), lastCheckpointAt: new Date() })
+        await tx.insert(dueDiligenceRecordingSessions).values({ id, projectId, interviewId, ownerUserId: req.user!.uid, clientRequestId: body.clientRequestId, activeKey: interviewId, mimeType: container.mimeType, fileName: name, source: body.source, epochs: [{ epoch: 0, mimeType: container.mimeType, fileName: name, ...(body.source === 'upload' && body.uploadManifest ? {uploadManifest:body.uploadManifest} : {}) }], leaseExpiresAt: leaseUntil(), lastCheckpointAt: new Date() })
         return (await tx.select().from(dueDiligenceRecordingSessions).where(eq(dueDiligenceRecordingSessions.id, id)).limit(1))[0]
       })
       await audit(req, '创建持久化访谈录音', session.id); res.status(201).json(publicRecordingSession(session))
@@ -144,6 +147,9 @@ export function createDueDiligenceInterviewRouter(onSummaryConfirmed?: SummaryCo
         if (locked.status === 'discarded') throw recordingError('RECORDING_SESSION_DISCARDED', '本次录入已放弃')
         const chunks = await tx.select().from(dueDiligenceRecordingChunks).where(eq(dueDiligenceRecordingChunks.sessionId, locked.id)).orderBy(asc(dueDiligenceRecordingChunks.sequence))
         if (!chunks.length) throw recordingError('EMPTY_RECORDING', '录音分片尚未保存，请先补传', 400)
+        const manifest = locked.epochs[0]?.uploadManifest
+        if (manifest && (chunks.length !== Math.ceil(manifest.size / manifest.chunkBytes) || chunks.reduce((sum, chunk) => sum + chunk.byteSize, 0) !== manifest.size)) throw recordingError('RECORDING_INCOMPLETE', '文件尚未完整上传，请重新选择原文件继续补传')
+        if (manifest && createHash('sha256').update(chunks.map(chunk => chunk.sha256).join('')).digest('hex') !== manifest.fingerprint) throw recordingError('RECORDING_FILE_CHANGED', '文件内容与上传清单不一致，请核对原文件', 422)
         for (const epoch of locked.epochs) {
           const blocks = chunks.filter(block => block.epoch === epoch.epoch)
           if (blocks.some((block, index) => block.sequence !== index)) throw recordingError('RECORDING_INCOMPLETE', '录音分片尚未全部保存，请重新保存后结束')
@@ -188,18 +194,34 @@ export function createDueDiligenceInterviewRouter(onSummaryConfirmed?: SummaryCo
     } catch (error) { next(error) }
   })
   router.post(`${base}/summary/tasks`, async (req: AuthedRequest, res, next) => {
-    try { const { projectId, interviewId } = await workspace(req); const body = z.object({ transcriptVersion: z.number().int().positive() }).parse(req.body); const task = await enqueueInterviewSummary(projectId, interviewId, req.user!.uid, req.user!.role, body.transcriptVersion); await audit(req, '排队生成完整访谈纪要', task.id); res.status(202).json(task) } catch (error) { next(error) }
+    try { const { projectId, interviewId } = await workspace(req); const body = z.object({ transcriptVersion: z.number().int().positive(), regenerate: z.boolean().default(false) }).parse(req.body); const task = await enqueueInterviewSummary(projectId, interviewId, req.user!.uid, req.user!.role, body.transcriptVersion, body.regenerate); await audit(req, '排队生成完整访谈纪要', task.id); res.status(202).json(task) } catch (error) { next(error) }
   })
   router.get(`${base}/summary/tasks`, async (req: AuthedRequest, res, next) => {
-    try { const { interviewId } = await workspace(req); const list = await db.select().from(dueDiligenceArtifactTasks).where(and(eq(dueDiligenceArtifactTasks.interviewId, interviewId), eq(dueDiligenceArtifactTasks.kind, 'summary'))).orderBy(desc(dueDiligenceArtifactTasks.createdAt)).limit(50); res.json({ list: list.map(publicSummaryTask) }) } catch (error) { next(error) }
+    try { const { interviewId } = await workspace(req); const list = await db.select().from(dueDiligenceArtifactTasks).where(and(eq(dueDiligenceArtifactTasks.interviewId, interviewId), eq(dueDiligenceArtifactTasks.kind, 'summary'))).orderBy(desc(dueDiligenceArtifactTasks.createdAt)).limit(req.query.latest === '1' ? 1 : 50); res.json({ list: list.map(publicSummaryTask) }) } catch (error) { next(error) }
   })
   router.post(`${base}/summary/tasks/:taskId/retry`, async (req: AuthedRequest, res, next) => {
     try {
       const { task } = await requireTask(req)
       if (task.createdBy !== req.user!.uid) throw recordingError('TASK_OWNER_REQUIRED', '请由纪要提交人重试任务', 403)
-      await db.update(dueDiligenceArtifactTasks).set({ status: 'queued', errorMessage: null, updatedAt: new Date() }).where(and(eq(dueDiligenceArtifactTasks.id, task.id), eq(dueDiligenceArtifactTasks.status, 'failed')))
+      await db.update(dueDiligenceArtifactTasks).set({ status: 'queued', errorMessage: null, updatedAt: new Date() }).where(and(eq(dueDiligenceArtifactTasks.id, task.id), inArray(dueDiligenceArtifactTasks.status, ['failed', 'cancelled'])))
       await wakeDueDiligenceArtifactWorker(); await audit(req, '重试完整访谈纪要', task.id)
       res.json(publicSummaryTask((await db.select().from(dueDiligenceArtifactTasks).where(eq(dueDiligenceArtifactTasks.id, task.id)).limit(1))[0]))
+    } catch (error) { next(error) }
+  })
+  router.post(`${base}/summary/tasks/:taskId/stop`, async (req: AuthedRequest, res, next) => {
+    try {
+      const { task } = await requireTask(req)
+      if (task.createdBy !== req.user!.uid) throw recordingError('TASK_OWNER_REQUIRED', '请由纪要提交人停止任务', 403)
+      const stoppedToken = await db.transaction(async tx => {
+        const [current] = await tx.select().from(dueDiligenceArtifactTasks).where(eq(dueDiligenceArtifactTasks.id, task.id)).for('update')
+        if (!current || !['queued', 'processing'].includes(current.status)) return null
+        await tx.update(dueDiligenceArtifactTasks).set({ status: 'cancelled', runToken: null, leaseExpiresAt: null, errorMessage: null, updatedAt: new Date() }).where(eq(dueDiligenceArtifactTasks.id, task.id))
+        return current.runToken
+      })
+      if (stoppedToken) abortSummaryRequest(task.id, stoppedToken)
+      const [current] = await db.select().from(dueDiligenceArtifactTasks).where(eq(dueDiligenceArtifactTasks.id,task.id)).limit(1)
+      await audit(req, current.status === 'cancelled' ? '停止生成纪要' : '核对纪要完成状态', task.id)
+      res.json(publicSummaryTask(current))
     } catch (error) { next(error) }
   })
   router.post(`${base}/summary/tasks/:taskId/confirm`, async (req: AuthedRequest, res, next) => {

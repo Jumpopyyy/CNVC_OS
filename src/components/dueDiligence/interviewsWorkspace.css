@@ -1,0 +1,16 @@
+.dd-interviews { container-type: inline-size; container-name: dd-interviews; }
+.dd-interviews .dd-live-grid { display: grid; gap: 20px; min-width: 0; }
+.dd-interviews .dd-transcript-column { min-width: 0; }
+.dd-interviews .dd-prompt-panel { border-top: 1px solid #e2e8f0; padding-top: 16px; min-width: 0; }
+.dd-interviews .dd-recording-toolbar { position: sticky; top: 0; z-index: 5; background: var(--surface-card, #fff); padding-block: 8px; }
+.dd-interviews .dd-prompt-panel > div:last-child { max-height: 640px; overflow: auto; }
+.dd-interviews textarea { overflow-wrap: anywhere; }
+@container dd-interviews (min-width: 960px) {
+  .dd-interviews .dd-live-grid { grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr); }
+  .dd-interviews .dd-prompt-panel { border-top: 0; border-left: 1px solid #e2e8f0; padding-top: 16px; padding-left: 20px; }
+}
+@container dd-interviews (max-width: 420px) {
+  .dd-interviews .dd-session-card { padding: 12px; }
+  .dd-interviews .min-w-64 { min-width: 0; flex: 1 0 100%; }
+  .dd-interviews .min-w-48 { min-width: 0; flex-basis: 100%; }
+}

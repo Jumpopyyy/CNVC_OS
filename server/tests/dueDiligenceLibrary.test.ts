@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { LibraryBindingSchema, LibrarySelectionSchema } from '../src/contracts/dueDiligenceLibrary.js'
+import { LibraryBindingSchema, LibrarySelectionSchema, libraryKey, librarySelectionForTask, updateLibraryBindingsForTasks } from '../src/contracts/dueDiligenceLibrary.js'
 import { executeDueDiligenceLibrary, getDueDiligenceLibrary, libraryContentHash, loadLibraryReference, resolveDueDiligenceLibrary, validateLibraryBindings, type LibraryDependencies, type LibraryResource } from '../src/services/dueDiligenceLibraryService.js'
 import { resolveDueDiligenceTwinContext, safePublicTwinContext } from '../src/services/dueDiligenceTwinRuntimeService.js'
 import { runAgentBlueprint } from '../src/services/agentBlueprintService.js'
@@ -14,6 +14,45 @@ const deps: LibraryDependencies = {
   get: async (_actor, ref) => { const item = [skill, agent].find(item => item.id === ref.id && item.source === ref.source); if (!item) throw Object.assign(new Error('禁止访问私人能力'), { status: 403 }); return item },
   run: async () => ({ id: 'synthetic-run', status: 'succeeded', steps: [], output: '核对回款证据', durationMs: 1 }),
 }
+test('unified selection can turn off every common capability without the backend adding it back', async () => {
+  const bindings = [skill, agent].map(ref => LibraryBindingSchema.parse({ ...ref, tasks: ['builder'] }))
+  const legacy = await resolveDueDiligenceLibrary({ actor, task: 'builder', bindings, selection: { skills: [], agent: null } }, deps)
+  assert.equal(legacy.resources.length, 2, 'old callers still inherit their saved defaults')
+  const result = await resolveDueDiligenceLibrary({ actor, task: 'builder', bindings, selection: LibrarySelectionSchema.parse({ skills: [], agent: null, replaceBindings: true }) }, { ...deps, get: async () => { throw new Error('excluded references must never be loaded') } })
+  assert.deepEqual(result.snapshot, [])
+  assert.equal(await executeDueDiligenceLibrary(actor, result, '合成输入', undefined, deps), null)
+})
+test('unified selection loads a selected method once and permits removing the common agent alone', async () => {
+  const bindings = [skill, agent].map(ref => LibraryBindingSchema.parse({ ...ref, tasks: ['builder'] }))
+  const result = await resolveDueDiligenceLibrary({ actor, task: 'builder', bindings, selection: { skills: [skill], agent: null, replaceBindings: true } }, deps)
+  assert.deepEqual(result.snapshot.map(libraryKey), [libraryKey(skill)])
+  await assert.rejects(resolveDueDiligenceLibrary({ actor, task: 'builder', bindings, selection: { skills: [{ ...skill, hash: 'c'.repeat(64) }], replaceBindings: true } }, deps), /已更新/)
+})
+test('capability bar and execution use the same defaults, deduplication and agent override semantics', async () => {
+  const bindings = [skill, agent].map(ref => LibraryBindingSchema.parse({ ...ref, tasks: ['builder'] }))
+  const display = librarySelectionForTask(bindings, 'builder', { skills: [skill] })
+  const executed = await resolveDueDiligenceLibrary({ actor, task: 'builder', bindings, selection: { skills: [skill] } }, deps)
+  assert.deepEqual([...display.skills, display.agent!].map(libraryKey), executed.snapshot.map(libraryKey))
+  const replacement = { ...agent, id: 'different-agent' }
+  assert.equal(librarySelectionForTask(bindings, 'builder', { skills: [], agent: replacement }).agent?.id, replacement.id)
+  assert.deepEqual(librarySelectionForTask(bindings, 'builder', { skills: [], agent: null, replaceBindings: true }).skills, [])
+})
+test('saving builder defaults keeps another task agent and method assignments intact', async () => {
+  const bindings = [skill, agent].map(ref => LibraryBindingSchema.parse({ ...ref, tasks: ['builder', 'conversation', 'checklist'] }))
+  const next = updateLibraryBindingsForTasks(bindings, { skills: [], agent: null }, ['builder'])
+  assert.deepEqual(next.map(ref => ref.tasks), [['conversation', 'checklist'], ['conversation', 'checklist']])
+  await validateLibraryBindings(actor, next, deps)
+  assert.equal(librarySelectionForTask(next, 'builder').agent, null)
+  assert.equal(librarySelectionForTask(next, 'conversation').agent?.id, agent.id)
+  assert.deepEqual(updateLibraryBindingsForTasks(bindings, { skills: [], agent: null }, ['builder', 'conversation', 'checklist']), [])
+})
+test('saved selection creates defaults for chosen tasks while disabled old tasks stay inactive', () => {
+  const old = LibraryBindingSchema.parse({ ...skill, enabled: false, tasks: ['checklist'] })
+  const next = updateLibraryBindingsForTasks([old], { skills: [skill], agent: null }, ['builder', 'conversation'])
+  assert.deepEqual(next[0].tasks, ['builder', 'conversation'])
+  assert.equal(next[0].enabled, true)
+  assert.throws(() => updateLibraryBindingsForTasks([], { skills: [] }, []), /适用场景/)
+})
 test('catalog exports authorized metadata only, never raw instructions or blueprints', async () => {
   const result = await getDueDiligenceLibrary(actor, undefined, deps)
   assert.equal(result.list.length, 2)

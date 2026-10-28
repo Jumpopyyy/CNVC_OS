@@ -829,7 +829,7 @@ export const dueDiligenceRecordingSessions = mysqlTable('due_diligence_recording
   mimeType: varchar('mime_type', { length: 128 }).notNull(),
   status: varchar('status', { length: 24 }).notNull().default('recording'),
   currentEpoch: int('current_epoch').notNull().default(0),
-  epochs: json('epochs').$type<Array<{ epoch: number; mimeType: string; fileName: string; fileId?: string }>>().notNull().default(emptyJsonArray),
+  epochs: json('epochs').$type<Array<{ epoch: number; mimeType: string; fileName: string; fileId?: string; uploadManifest?: import('../contracts/dueDiligenceCollaboration.js').RecordingUploadManifest }>>().notNull().default(emptyJsonArray),
   durationSeconds: int('duration_seconds').notNull().default(0),
   byteSize: bigint('byte_size', { mode: 'number' }).notNull().default(0),
   leaseExpiresAt: timestampColumn('lease_expires_at'),

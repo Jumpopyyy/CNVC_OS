@@ -96,7 +96,7 @@ export interface AgentConversationRepository {
   ensureAgentFromChat(chat: ChatConversationRecord): Promise<AgentConversationRecord>
   createConversationPair(input: CreateConversationPairInput): Promise<ChatConversationRecord>
   renameConversationPair(userId: string, conversationId: string, title: string): Promise<ChatConversationRecord | null>
-  appendChatMessages(userId: string, conversationId: string, messages: unknown[], title?: string): Promise<ChatConversationRecord | null>
+  appendChatMessages(userId: string, conversationId: string, messages: unknown[], title?: string, expectedLastMessageId?: string | null): Promise<ChatConversationRecord | null>
   deleteConversationPair(userId: string, conversationId: string): Promise<boolean>
   findMessageByExternalId(conversationId: string, externalMessageId: string): Promise<AgentMessageRecord | null>
   saveMessage(input: SaveAgentMessageInput): Promise<AgentMessageRecord>

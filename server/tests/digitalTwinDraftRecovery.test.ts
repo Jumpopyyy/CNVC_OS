@@ -40,3 +40,22 @@ test('new unsaved twins retain their creation idempotency key; oversized drafts 
   assert.equal(saved.content?.draft.id, '')
   assert.throws(() => nextTwinDraftRecord(undefined, owner, 0, { ...content, draft: { ...content.draft, rules: 'x'.repeat(4_000_001) } }), /草稿过大/)
 })
+
+test('a sent-message edit survives reload with its conflict check while retaining a separate unsent draft', () => {
+  const editingMessage = { messageId: id, content: '修改后的关注点', expectedContent: '原关注点', expectedLastMessageId: assetId }
+  const saved = nextTwinDraftRecord(undefined, owner, 0, { ...content, builder: { ...content.builder, editingMessage } })
+  assert.deepEqual(recoverTwinDraft(saved, owner).content?.builder.editingMessage, editingMessage)
+  assert.equal(recoverTwinDraft(saved, owner).content?.builder.message, '未发送的需求')
+})
+
+test('changing a starting point does not revive superseded suggestions after draft recovery', () => {
+  const saved = nextTwinDraftRecord(undefined, owner, 0, { ...content, builder: { ...content.builder, proposalOutdated: true } })
+  assert.equal(recoverTwinDraft(saved, owner).content?.builder.proposalOutdated, true)
+  assert.deepEqual(recoverTwinDraft(saved, owner).content?.builder.proposal, content.builder.proposal)
+})
+
+test('explicitly turning off common capabilities remains off after recovering an unsent draft', () => {
+  const librarySelection = { skills: [], agent: null, replaceBindings: true }
+  const saved = nextTwinDraftRecord(undefined, owner, 0, { ...content, builder: { ...content.builder, librarySelection } })
+  assert.deepEqual(recoverTwinDraft(saved, owner).content?.builder.librarySelection, librarySelection)
+})

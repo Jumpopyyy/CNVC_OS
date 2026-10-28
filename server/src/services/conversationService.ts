@@ -102,7 +102,7 @@ export async function renameConversation(userId: string, id: string, title: stri
 }
 
 // 追加一批消息（通常一次追加一条 user + 一条 assistant），并可更新标题
-export async function appendMessages(userId: string, id: string, newMessages: ChatMessageRow[], title?: string) {
+export async function appendMessages(userId: string, id: string, newMessages: ChatMessageRow[], title?: string, expectedLastMessageId?: string | null) {
   const conv = await getConversation(userId, id)
   if (!conv) return undefined
   const merged = [...(conv.messages as ChatMessageRow[]), ...newMessages]
@@ -113,7 +113,7 @@ export async function appendMessages(userId: string, id: string, newMessages: Ch
     const firstUser = merged.find((m) => m.role === 'user')
     if (firstUser) nextTitle = firstUser.content.slice(0, 40)
   }
-  return agentConversationRepository.appendChatMessages(userId, id, newMessages, nextTitle)
+  return agentConversationRepository.appendChatMessages(userId, id, newMessages, nextTitle, expectedLastMessageId)
 }
 
 export async function deleteConversation(userId: string, id: string) {

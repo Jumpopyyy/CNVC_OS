@@ -583,6 +583,14 @@ dueDiligenceRouter.put('/projects/:projectId/interviews/:id/transcript', async (
     const [current] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
     if (current) {
       if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error('转写稿已在其他页面更新，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
+      // Content versions are stable for repeat saves and status-only confirmation.
+      if (current.content === body.content) {
+        if (body.status === '已确认' && current.status !== '已确认') await db.update(dueDiligenceInterviewTranscripts).set({status:'已确认',updatedAt:new Date()}).where(and(eq(dueDiligenceInterviewTranscripts.id,current.id),eq(dueDiligenceInterviewTranscripts.version,current.version)))
+        const [saved] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.id,current.id)).limit(1)
+        if (saved.version !== current.version) throw Object.assign(new Error('转写稿已更新，请核对最新内容'),{status:409,code:'TRANSCRIPT_VERSION_CONFLICT'})
+        if (body.status === '已确认' && current.status !== '已确认') await audit(req, '确认访谈转写稿', interviewId)
+        res.json(saved); return
+      }
       const [result] = await db.update(dueDiligenceInterviewTranscripts).set({ ...body, version: sql`${dueDiligenceInterviewTranscripts.version} + 1`, updatedAt: new Date() }).where(and(eq(dueDiligenceInterviewTranscripts.id, current.id), eq(dueDiligenceInterviewTranscripts.version, current.version)))
       if (result.affectedRows !== 1) throw Object.assign(new Error('转写稿已在其他页面更新，请刷新并合并后重试'), { status: 409, code: 'TRANSCRIPT_VERSION_CONFLICT' })
     } else {
@@ -702,8 +710,10 @@ dueDiligenceRouter.get('/projects/:projectId/interviews/:id/export/:kind', async
     const [transcript] = await db.select().from(dueDiligenceInterviewTranscripts).where(eq(dueDiligenceInterviewTranscripts.interviewId, interviewId)).limit(1)
     const title = `${interview.title}${kind === 'transcript' ? '－访谈转写稿' : '－访谈纪要'}`
     const content = kind === 'transcript' ? transcript?.content : interview.summary
+    const expectedVersion = req.query.version === undefined ? undefined : z.coerce.number().int().positive().parse(req.query.version)
+    if (kind === 'transcript' && expectedVersion !== undefined && transcript?.version !== expectedVersion) throw Object.assign(new Error('转写稿已更新，请核对后重新导出'), {status:409,code:'TRANSCRIPT_VERSION_CONFLICT'})
     if (!content?.trim()) throw Object.assign(new Error(kind === 'transcript' ? '暂无可导出的转写稿' : '暂无可导出的访谈纪要'), { status: 400, code: 'EMPTY_EXPORT' })
-    const doc = new Document({ sections: [{ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: title, bold: true, size: 32, font: '黑体' })] }), new Paragraph(`项目：${project?.name ?? ''}`), new Paragraph(`访谈：${interview.title}`), new Paragraph(`导出时间：${new Date().toLocaleString('zh-CN')}`), new Paragraph({ text: content })] }] })
+    const doc = new Document({ sections: [{ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: title, bold: true, size: 32, font: '黑体' })] }), new Paragraph(`项目：${project?.name ?? ''}`), new Paragraph(`访谈：${interview.title}`), ...content.split(/\r?\n/).map(text => new Paragraph({spacing:{after:100},children:[new TextRun({text,font:'宋体',size:22})]}))] }] })
     const buffer = await Packer.toBuffer(doc); await audit(req, kind === 'transcript' ? '导出访谈转写Word' : '导出访谈纪要Word', interviewId)
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'); res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${title}.docx`)}`); res.send(buffer)
   } catch (error) { next(error) }
@@ -712,16 +722,18 @@ dueDiligenceRouter.get('/projects/:projectId/interviews/:id/export/:kind', async
 dueDiligenceRouter.post('/projects/:projectId/interviews/:id/prompts', async (req: AuthedRequest, res, next) => {
   try {
     const projectId = routeId(req.params.projectId); const interviewId = routeId(req.params.id); await requireDueDiligenceProject(req.user!.uid, projectId)
-    const body = z.object({ content: z.string().trim().min(1).max(4000), questionId: z.string().uuid().nullable().optional() }).parse(req.body)
+    const body = z.object({ content: z.string().trim().min(1).max(4000), questionId: z.string().uuid().nullable().optional(), clientRequestId: z.string().uuid().optional() }).parse(req.body)
     const [interview] = await db.select({ id: dueDiligenceInterviews.id }).from(dueDiligenceInterviews).where(and(eq(dueDiligenceInterviews.id, interviewId), eq(dueDiligenceInterviews.projectId, projectId))).limit(1)
     if (!interview) { res.status(404).json({ code: 'NOT_FOUND', message: '访谈不存在' }); return }
     if (body.questionId) {
       const [question] = await db.select({ id: dueDiligenceQuestions.id }).from(dueDiligenceQuestions).where(and(eq(dueDiligenceQuestions.id, body.questionId), eq(dueDiligenceQuestions.projectId, projectId))).limit(1)
       if (!question) throw Object.assign(new Error('关联核查问题不属于当前项目'), { status: 400, code: 'INVALID_QUESTION_LINK' })
     }
-    const [inserted] = await db.insert(dueDiligenceInterviewPrompts).values({ interviewId, content: body.content, questionId: body.questionId ?? null, createdBy: req.user!.uid, createdByName: req.user!.name }).$returningId()
-    const [row] = await db.select().from(dueDiligenceInterviewPrompts).where(eq(dueDiligenceInterviewPrompts.id, inserted.id)).limit(1)
-    await audit(req, '提交远程插问', body.content); res.status(201).json(row)
+    const id = body.clientRequestId ?? randomUUID()
+    await db.insert(dueDiligenceInterviewPrompts).values({ id, interviewId, content: body.content, questionId: body.questionId ?? null, createdBy: req.user!.uid, createdByName: req.user!.name }).onDuplicateKeyUpdate({set:{id:sql`${dueDiligenceInterviewPrompts.id}`}})
+    const [row] = await db.select().from(dueDiligenceInterviewPrompts).where(eq(dueDiligenceInterviewPrompts.id,id)).limit(1)
+    if (row.interviewId !== interviewId || row.createdBy !== req.user!.uid || row.content !== body.content || row.questionId !== (body.questionId ?? null)) throw Object.assign(new Error('插问请求已用于其他内容，请核对后重新发送'),{status:409,code:'PROMPT_REQUEST_CONFLICT'})
+    await audit(req, '提交远程插问', id); res.status(201).json(row)
   } catch (error) { next(error) }
 })
 dueDiligenceRouter.get('/projects/:projectId/interviews/:id/prompts', async (req: AuthedRequest, res, next) => {
@@ -731,10 +743,18 @@ dueDiligenceRouter.get('/projects/:projectId/interviews/:id/prompts', async (req
 dueDiligenceRouter.patch('/projects/:projectId/interviews/:id/prompts/:promptId', async (req: AuthedRequest, res, next) => {
   try {
     const projectId = routeId(req.params.projectId); const interviewId = routeId(req.params.id); const promptId = routeId(req.params.promptId); await requireDueDiligenceProject(req.user!.uid, projectId)
-    const { status, response } = z.object({ status: z.enum(['待确认', '已确认', '已忽略']), response: z.string().trim().max(4000).optional().default('') }).parse(req.body)
+    const { status, response } = z.object({ status: z.enum(['已确认', '已忽略']), response: z.string().trim().max(4000).optional().default('') }).parse(req.body)
     const [interview] = await db.select({ id: dueDiligenceInterviews.id }).from(dueDiligenceInterviews).where(and(eq(dueDiligenceInterviews.id, interviewId), eq(dueDiligenceInterviews.projectId, projectId))).limit(1)
     if (!interview) { res.status(404).json({ code: 'NOT_FOUND', message: '访谈不存在' }); return }
-    await db.update(dueDiligenceInterviewPrompts).set({ status, response, handledBy: req.user!.uid, handledAt: new Date() }).where(and(eq(dueDiligenceInterviewPrompts.id, promptId), eq(dueDiligenceInterviewPrompts.interviewId, interviewId)))
+    await db.transaction(async tx => {
+      const [current] = await tx.select().from(dueDiligenceInterviewPrompts).where(and(eq(dueDiligenceInterviewPrompts.id,promptId),eq(dueDiligenceInterviewPrompts.interviewId,interviewId))).for('update')
+      if (!current) throw Object.assign(new Error('插问已删除，请刷新核对'),{status:404,code:'NOT_FOUND'})
+      if (current.status !== '待确认') {
+        if (current.status === status && (current.response || '') === response && current.handledBy === req.user!.uid) return
+        throw Object.assign(new Error('该插问已被处理，您的答复仍保留，请刷新核对'),{status:409,code:'PROMPT_STATUS_CHANGED'})
+      }
+      await tx.update(dueDiligenceInterviewPrompts).set({ status, response, handledBy: req.user!.uid, handledAt: new Date() }).where(eq(dueDiligenceInterviewPrompts.id,promptId))
+    })
     await audit(req, '确认现场插问', status); res.json({ ok: true })
   } catch (error) { next(error) }
 })

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { speechRecoveryDelay } from '../../server/src/contracts/dueDiligenceCollaboration'
 
 export type SpeechInputState = 'idle' | 'requesting' | 'listening' | 'paused' | 'error' | 'complete'
 type RecognitionResultLike = { 0: { transcript: string }; isFinal?: boolean }
@@ -66,6 +67,9 @@ export function useSpeechRecognition(options: {
   const stopResolver = useRef<(() => void) | null>(null)
   const stopPromise = useRef<Promise<void> | null>(null)
   const stopTimer = useRef<number | null>(null)
+  const restartTimer = useRef<number | null>(null)
+  const recoveryAttempts = useRef(0)
+  const lastError = useRef('')
   const optionsRef = useRef(options)
   optionsRef.current = options
 
@@ -91,9 +95,10 @@ export function useSpeechRecognition(options: {
     const item = new Speech()
     finalResultCursor.current = 0
     item.lang = 'zh-CN'; item.continuous = Boolean(optionsRef.current.continuous); item.interimResults = true
-    item.onstart = () => { if (recognizer.current === item) { setState('listening'); setError('') } }
+    item.onstart = () => { if (recognizer.current === item) { setState('listening'); if (!recoveryAttempts.current) setError('') } }
     item.onresult = event => {
       if (recognizer.current !== item) return
+      recoveryAttempts.current = 0; lastError.current = ''; setError('')
       const delta = readSpeechRecognitionDelta(event.results, finalResultCursor.current, event.resultIndex ?? finalResultCursor.current)
       finalResultCursor.current = delta.nextCursor
       if (delta.confirmed) {
@@ -116,17 +121,23 @@ export function useSpeechRecognition(options: {
       if (recognizer.current !== item) return
       if (intentionalStop.current && event.error === 'aborted') return
       if (event.error === 'no-speech' && shouldListen.current && optionsRef.current.continuous) return
+      lastError.current = event.error
+      if (speechRecoveryDelay(event.error, recoveryAttempts.current) === null) shouldListen.current = false
       setState('error'); setError(speechErrorMessage(event.error))
     }
     item.onend = () => {
       if (recognizer.current !== item) return
       recognizer.current = null
       if (shouldListen.current && optionsRef.current.continuous) {
-        window.setTimeout(() => { if (shouldListen.current && !recognizer.current) createAndStart() }, 150)
+        flushInterim()
+        const delay = lastError.current ? speechRecoveryDelay(lastError.current, recoveryAttempts.current++) : 150
+        if (delay === null) { shouldListen.current = false; setState('error'); setError('实时识别恢复失败，请手动重试。已有文字已保留。'); return }
+        if (lastError.current) setError(`实时识别暂时不可用，${Math.ceil(delay / 1000)} 秒后重试（${recoveryAttempts.current}/3）。`)
+        restartTimer.current = window.setTimeout(() => { restartTimer.current = null; if (shouldListen.current && !recognizer.current) createAndStart() }, delay)
       } else if (stopResolver.current) stopResolver.current()
       else {
         flushInterim()
-        if (!intentionalStop.current) setState('complete')
+        if (!intentionalStop.current) setState(lastError.current ? 'error' : 'complete')
       }
     }
     recognizer.current = item
@@ -134,6 +145,8 @@ export function useSpeechRecognition(options: {
   }, [flushInterim])
 
   const start = useCallback(() => {
+    if (restartTimer.current !== null) window.clearTimeout(restartTimer.current)
+    restartTimer.current = null; recoveryAttempts.current = 0; lastError.current = ''
     stopResolver.current?.()
     intentionalStop.current = false; shouldListen.current = true; setState('requesting'); setError('')
     if (stopTimer.current !== null) window.clearTimeout(stopTimer.current)
@@ -142,6 +155,8 @@ export function useSpeechRecognition(options: {
   }, [createAndStart])
 
   const stopWithState = useCallback((nextState: 'paused' | 'complete') => {
+    if (restartTimer.current !== null) window.clearTimeout(restartTimer.current)
+    restartTimer.current = null
     shouldListen.current = false; intentionalStop.current = true; setState(nextState)
     if (stopPromise.current) return stopPromise.current
     const current = recognizer.current
@@ -168,9 +183,9 @@ export function useSpeechRecognition(options: {
   const pause = useCallback(() => stopWithState('paused'), [stopWithState])
   const stop = useCallback(() => stopWithState('complete'), [stopWithState])
 
-  const reset = useCallback(() => { shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); stopTimer.current = null; const previous = recognizer.current; recognizer.current = null; previous?.abort?.(); finalResultCursor.current = 0; lastFinalText.current = ''; lastFinalAt.current = 0; flushedInterimText.current = ''; flushedInterimAt.current = 0; optionsRef.current.onInterim?.(''); setError(''); setState('idle') }, [])
+  const reset = useCallback(() => { if (restartTimer.current !== null) window.clearTimeout(restartTimer.current); restartTimer.current = null; shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); stopTimer.current = null; const previous = recognizer.current; recognizer.current = null; previous?.abort?.(); finalResultCursor.current = 0; lastFinalText.current = ''; lastFinalAt.current = 0; flushedInterimText.current = ''; flushedInterimAt.current = 0; optionsRef.current.onInterim?.(''); setError(''); setState('idle') }, [])
 
-  useEffect(() => () => { shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); const previous = recognizer.current; recognizer.current = null; previous?.abort?.() }, [])
+  useEffect(() => () => { if (restartTimer.current !== null) window.clearTimeout(restartTimer.current); shouldListen.current = false; intentionalStop.current = true; lastInterim.current = ''; stopResolver.current?.(); if (stopTimer.current !== null) window.clearTimeout(stopTimer.current); const previous = recognizer.current; recognizer.current = null; previous?.abort?.() }, [])
 
   return { state, error, supported: Boolean(recognitionConstructor()), start, pause, stop, reset, flushInterim }
 }

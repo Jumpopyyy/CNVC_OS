@@ -174,13 +174,16 @@ class MySqlAgentConversationRepository implements AgentConversationRepository {
     }))
   }
 
-  async appendChatMessages(userId: string, conversationId: string, messages: unknown[], title?: string) {
+  async appendChatMessages(userId: string, conversationId: string, messages: unknown[], title?: string, expectedLastMessageId?: string | null) {
     return mapped('agent.appendChatMessages', () => db.transaction(async (tx) => {
       await tx.execute(sql`SELECT ${chatConversations.id} FROM ${chatConversations}
         WHERE ${chatConversations.id}=${conversationId} AND ${chatConversations.userId}=${userId} FOR UPDATE`)
       const repository = createMySqlAgentConversationRepository(tx)
       const current = await repository.findChatByIdForUser(userId, conversationId)
       if (!current) return null
+      if (expectedLastMessageId !== undefined && ((current.messages.at(-1) as { id?: string } | undefined)?.id ?? null) !== expectedLastMessageId) {
+        throw Object.assign(new Error('对话已在其他页面更新，输入已保留，请刷新后重试'), { status: 409 })
+      }
       await tx.update(chatConversations).set({
         messages: [...current.messages, ...messages],
         ...(title ? { title } : {}),
